@@ -48,6 +48,17 @@ def test_rejects_empty(settings):
         load_adf_json(b"   ", filename="p.json", settings=settings)
 
 
+def test_rejects_deeply_nested_json_without_crashing(settings):
+    """A small file (well under max_upload_bytes) can still nest deeply enough to
+    exceed Python's recursion limit inside json.loads(). This must raise a clean
+    InvalidJsonError, not an uncaught RecursionError (security review finding)."""
+    depth = 150_000
+    deeply_nested = b'{"a":' * depth + b"1" + b"}" * depth
+    assert len(deeply_nested) < settings.max_upload_bytes
+    with pytest.raises(InvalidJsonError, match="too deeply nested"):
+        load_adf_json(deeply_nested, filename="deep.json", settings=settings)
+
+
 @pytest.mark.parametrize(
     ("fixture", "expected"),
     [

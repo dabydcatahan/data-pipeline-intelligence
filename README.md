@@ -58,7 +58,7 @@ User → Streamlit UI → Upload/Validation → ADF JSON Parser
 | F005–F007 | Source / sink / transformation discovery (Inventory page) | ✅ done |
 
 **The full feature catalogue (F001–F024) is implemented.** Remaining work is
-release hardening (Docker build verification, security review, a 5 MiB
+release hardening (wheel build verification, security review, a 5 MiB
 performance benchmark).
 | F008 | Pipeline / Copy-activity column lineage + cross-artifact stitching | ⬜ planned |
 
@@ -93,7 +93,7 @@ performance benchmark).
 | Streamlit UI | Yes | Dashboard, Pipeline Explorer, Data Flow Explorer, Column Lineage & Impact (search + narrative + score + graph), Inventory, Documentation, AI Insights; in-memory, no persistence |
 | Inventory / discovery | Yes | Cross-artifact tables: datasets (reader/writer artifacts + column counts), sources, sinks, transformations |
 | Linked-service names / dataset formats | No | Those live in Dataset / LinkedService JSON, which this tool classifies as "unknown" (and connection details must never be surfaced) |
-| Documentation generation | Markdown + HTML | Deterministic; pipeline & data-flow docs incl. per-transformation column mapping + end-to-end column lineage; `.md` / standalone `.html` download in the UI (dependency-free, XSS-safe converter) |
+| Documentation generation | Markdown + HTML + Word | Deterministic; pipeline & data-flow docs incl. per-transformation column mapping + end-to-end column lineage; `.md` / standalone `.html` (dependency-free, XSS-safe converter) download in the UI; styled `.docx` (title page, auto-updating TOC, bordered/banded tables) via optional `pip install '.[docx]'` |
 | AI insights | Yes | Offline `DeterministicInsightProvider` (only provider) turns structural facts into summary / observations / risks / recommendations. Fully offline, no network calls, no LLM. AI never determines lineage |
 | Lineage through `unpivot` / unrecognized operators | Approx. | Passthrough approximation + warning |
 | Secrets / connection strings | Redacted | Secret-bearing keys dropped before they reach any model |
@@ -102,12 +102,29 @@ performance benchmark).
 
 Requires **Python 3.11+**.
 
+**From source (development):**
+
 ```bash
 git clone <repo-url> data-pipeline-intelligence
 cd data-pipeline-intelligence
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 ```
+
+**From a wheel (end users):** download the `.whl` from a release (or build
+one yourself — see [Building a wheel](#building-a-wheel) below), then:
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install data_pipeline_intelligence-<version>-py3-none-any.whl
+adf-intelligence   # launches the Streamlit UI
+```
+
+No source checkout needed — the wheel is self-contained (including
+`app/insights/error_patterns.json`, the deterministic error-classification
+data). Optional extras (`[viz]` for interactive PyVis graphs, `[docx]` for
+Word export) can be added the same way, e.g.
+`pip install "data_pipeline_intelligence-<version>-py3-none-any.whl[docx]"`.
 
 ## Running the application
 
@@ -138,16 +155,28 @@ mypy
 The full suite runs offline with no Azure credentials. Synthetic fixtures live
 in [`tests/fixtures/`](tests/fixtures/).
 
-## Docker
+## Building a wheel
+
+No Docker — distribution is a single `.whl` file a user downloads and
+`pip install`s locally (see [Installation](#installation) above).
 
 ```bash
-docker compose up --build
-# or:
-docker build -t data-pipeline-intelligence .
-docker run --rm -p 8501:8501 data-pipeline-intelligence
+pip install build
+python -m build --wheel
+# -> dist/data_pipeline_intelligence-<version>-py3-none-any.whl
 ```
 
-The container runs `streamlit run app/ui/app.py` on port 8501.
+The build is verified (in CI and manually) by installing that exact wheel
+into a **fresh, isolated venv** — not the dev checkout — and confirming
+`adf-intelligence` / `streamlit run` actually serves
+(`GET /_stcore/health` → `200`) before it's handed to anyone:
+
+```bash
+python -m venv /tmp/verify && source /tmp/verify/bin/activate
+pip install dist/data_pipeline_intelligence-*-py3-none-any.whl
+adf-intelligence &
+curl -s http://localhost:8501/_stcore/health   # expect: ok
+```
 
 ## Security considerations
 
@@ -193,7 +222,7 @@ hardening.
 8. ~~AI insight providers (deterministic only)~~ ✅
 9. ~~Pipeline / Copy-activity column lineage + cross-artifact stitching~~ ✅
 10. ~~Source / sink / transformation discovery & inventory views~~ ✅
-11. Release hardening: Docker build check, security review, 5 MiB perf benchmark *(next)*
+11. Release hardening: wheel build check, security review, 5 MiB perf benchmark *(next)*
 
 ## Project layout
 

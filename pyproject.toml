@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Automated Azure Data Factory column-level lineage, documentation & deterministic AI insights (offline, upload-driven)."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "Proprietary" }
+license = "LicenseRef-Proprietary"
 authors = [{ name = "Data Pipeline Intelligence Team" }]
 keywords = ["azure-data-factory", "adf", "data-lineage", "documentation", "column-lineage"]
 

@@ -69,6 +69,12 @@ def load_adf_json(
             f"File '{filename}' is not valid JSON "
             f"(line {exc.lineno}, column {exc.colno}): {exc.msg}."
         ) from exc
+    except RecursionError as exc:
+        # json.loads() recurses per nesting level; a small file can still nest
+        # deeply enough (well within max_upload_bytes) to exceed Python's
+        # recursion limit. Turn that into a clean, user-facing error instead of
+        # an uncaught crash / traceback leak.
+        raise InvalidJsonError(f"File '{filename}' is too deeply nested to parse.") from exc
 
     if not isinstance(parsed, dict):
         raise InvalidJsonError(

@@ -105,3 +105,33 @@ def test_missing_scriptlines_is_non_fatal(read_fixture_bytes):
     assert df.transformation("T1") is not None
     assert any("no scriptLines" in w for w in ctx.warnings)
     assert any("recorded by name only" in w for w in ctx.warnings)
+
+
+def test_secret_like_keys_in_type_properties_are_scrubbed_defensively():
+    """ADF's own schema doesn't put credentials in data flow source/sink
+    typeProperties (they live in a separately-referenced linked service this tool
+    never parses), but a stray secret-shaped key must never survive parsing
+    regardless - defense in depth, matching pipeline_parser.py's guarantee."""
+    obj = {
+        "name": "EvilFlow",
+        "properties": {
+            "typeProperties": {
+                "sources": [
+                    {
+                        "name": "Src1",
+                        "password": "hunter2",
+                        "accountKey": "supersecretkey==",
+                        "dataset": {"referenceName": "Ds1"},
+                    }
+                ],
+                "sinks": [],
+                "transformations": [],
+                "scriptLines": ["source(output(a as string)) ~> Src1"],
+            }
+        },
+    }
+    df, _ctx = DataFlowParser().parse(obj, source_filename="evil.json")
+    assert df.name == "EvilFlow"
+    blob = json.dumps(df.model_dump(), default=str)
+    assert "hunter2" not in blob
+    assert "supersecretkey" not in blob

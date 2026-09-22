@@ -11,7 +11,7 @@ Insights (deterministic only; LLM support removed, see session 13). Remaining wo
 Release Checklist (coverage on core packages, Docker image build verification,
 security review of the upload path, 5 MiB performance check).
 
-**Last updated:** 2026-09-22 (session 17)
+**Last updated:** 2026-09-22 (session 18)
 
 **Verification (session 12):** `ruff check` clean · `ruff format --check` clean ·
 `mypy` clean (47 files) · `pytest` 175 passed (incl. 7 Streamlit `AppTest` smoke
@@ -178,7 +178,7 @@ templates), `markdown` (HTML export). An LLM SDK was briefly added behind
 | F024 | Data Flow Explorer + Column Lineage / Impact UI | [x] |
 | F025 | Configuration management | [x] |
 | F026 | Structured logging | [x] |
-| F027 | Docker support | [x] |
+| F027 | Docker support | removed (session 18) - see below, distribution is now a wheel |
 | F028 | CI pipeline | [x] |
 | F029 | Analysis session / caching layer | [-] (session container done, caching TBD) |
 
@@ -1127,3 +1127,67 @@ before this session; all classify correctly now.
   `business_validation_error` gets its own checkpoint, not the generic
   lineage-trace fallback. Full suite green, `mypy app` / `ruff check` /
   `ruff format --check` all clean.
+
+### Session 18 (2026-09-22) — Drop Docker for a wheel; Streamlit deprecation fix; security review
+
+**Distribution: Docker -> wheel.** Removed `Dockerfile` and `docker-compose.yml`
+(the latter was already broken - it referenced `ADFPI_ENABLE_LLM_INSIGHTS`,
+removed in session 13). F027 in the catalogue is now "removed"; end-user
+distribution is `python -m build --wheel` -> a single `.whl` a user downloads
+and `pip install`s, no container runtime needed. Fixed a `project.license`
+TOML-table deprecation (setuptools >=77 wants an SPDX string) surfaced while
+verifying the build. **Verified for real**, not just "it builds": installed the
+actual built wheel into a fresh, isolated venv (not the dev checkout - `import
+app` from inside the source tree would silently shadow the installed copy) and
+confirmed `app/insights/error_patterns.json` is present as package data,
+`adf-intelligence` boots, and `GET /_stcore/health` returns `200`. README
+"Docker" section replaced with "Building a wheel", including that exact
+verification recipe so it doesn't bit-rot silently next time.
+
+**Streamlit deprecation fix.** All 4 `st.graphviz_chart(..., use_container_width=True)`
+calls (`page_pipeline_explorer`, `page_column_lineage` x2, `page_error_analyzer`)
+-> `width="stretch"`; `use_container_width` is removed after 2025-12-31.
+Confirmed via AppTest that the deprecation warning is gone and the pages still
+render without exception.
+
+**Security review of the upload path.** Systematically re-verified each
+documented guarantee against the actual code (not just the docs):
+- Only `json.loads` used anywhere in `app/` (grepped for
+  `eval|exec|pickle|yaml|__import__|subprocess|os.system` - the only
+  `subprocess` call is the `adf-intelligence` launcher shelling out to a fixed
+  `streamlit run` command, unrelated to uploaded content).
+- Logging: `ParseContext.warn()` (parse-time, goes to the real Python logger)
+  only ever embeds structural metadata (names, counts) - confirmed by grepping
+  every `ctx.warn(f"...")` call site. `_Builder.warn()` (lineage-time, embeds
+  raw DFS expression text into warnings) only appends to an in-memory list,
+  **never** reaches the logger - confirmed by reading its implementation.
+  `app/core/logging.py` logs to stderr only, no file handler, matching the
+  in-memory-only architecture.
+- Secret scrubbing: `pipeline_parser.py` already called `scrub_secrets()` on
+  `typeProperties`; `dataflow_parser.py` did **not**. In practice this wasn't
+  exploitable today (`DataFlowParser` only ever extracts specific whitelisted
+  fields - name, dataset reference, DFS script text - never the raw dict
+  itself), but it was a real gap between the documented universal guarantee
+  and the code, and a future field read could silently reintroduce a leak.
+  Fixed: `dataflow_parser.py` now scrubs `typeProperties` too, with a test
+  proving a `password`/`accountKey`-shaped key injected into a data flow
+  source never survives parsing.
+- **Real bug found and fixed:** a JSON file well **under** the 5 MiB upload
+  limit can nest deeply enough (~150k levels, <1 MB) to blow Python's
+  recursion limit inside `json.loads()`, raising an uncaught `RecursionError`
+  - not the clean `InvalidJsonError` every other malformed-input path
+  produces. `load_adf_json()` now catches `RecursionError` alongside
+  `JSONDecodeError`. This was a genuine gap: the size limit alone doesn't
+  bound nesting depth, so a tiny adversarial (or just very ugly,
+  programmatically-generated) file could crash the analysis instead of
+  failing cleanly.
+- XSS-safety of the HTML export was already verified in session 16 with an
+  actual `<script>`/`onerror` payload; re-confirmed still holds.
+
+Full suite green, `mypy app` / `ruff check` / `ruff format --check` all clean.
+
+**Next recommended task:** the remaining release-checklist item - a ~5 MiB
+synthetic pipeline/data-flow performance benchmark (parse + lineage + combined
+graph, confirm the <2s/<200ms targets in §11) - plus the lower-priority lineage
+gaps noted in session 14/16 (`unpivot`/`parse`/`surrogateKey` argument
+decomposition, pipeline-dialect expression parser column notion).

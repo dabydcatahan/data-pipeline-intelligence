@@ -328,7 +328,7 @@ def page_pipeline_explorer(service: AnalysisService, session: AnalysisSession) -
     lineage = service.pipeline_lineage(pipeline)
     with st.expander("Column lineage (Copy activities)"):
         if len(lineage.graph):
-            st.graphviz_chart(service.lineage_dot(lineage), use_container_width=True)
+            st.graphviz_chart(service.lineage_dot(lineage), width="stretch")
         else:
             st.caption(
                 "No Copy activity carries an explicit column mapping (translator), "
@@ -585,12 +585,12 @@ def page_column_lineage(service: AnalysisService, session: AnalysisSession) -> N
                 level=report.level.value,
                 critical_path=report.critical_path,
             ),
-            use_container_width=True,
+            width="stretch",
         )
         st.divider()
 
     with st.expander("Full data-flow column graph"):
-        st.graphviz_chart(service.lineage_dot(lineage), use_container_width=True)
+        st.graphviz_chart(service.lineage_dot(lineage), width="stretch")
 
 
 def page_documentation(service: AnalysisService, session: AnalysisSession) -> None:
@@ -930,7 +930,7 @@ def page_error_analyzer(service: AnalysisService, session: AnalysisSession) -> N
                 with st.expander(f"📊 Lineage graph for {journey.column}", expanded=False):
                     st.graphviz_chart(
                         service.lineage_dot(lineage, focus=journey.node_id, direction="both"),
-                        use_container_width=True,
+                        width="stretch",
                     )
     elif session.artifacts and analysis.detected_entities:
         st.caption(

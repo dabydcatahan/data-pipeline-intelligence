@@ -17,7 +17,7 @@ from app.models.dataflow import (
     DataFlowSource,
     DataFlowTransformation,
 )
-from app.parsers.base import ParseContext
+from app.parsers.base import ParseContext, scrub_secrets
 from app.parsers.dfs_script import extract_columns, parse_script
 
 logger = get_logger(__name__)
@@ -52,6 +52,11 @@ class DataFlowParser:
         properties = obj.get("properties")
         props: dict[str, Any] = properties if isinstance(properties, dict) else {}
         type_props = props.get("typeProperties")
+        # Data flow source/sink typeProperties don't carry secrets in ADF's own
+        # schema (credentials live in a separately referenced, never-parsed linked
+        # service), but scrub defensively anyway for consistency with
+        # pipeline_parser.py, in case a future field read adds one without noticing.
+        type_props = scrub_secrets(type_props) if isinstance(type_props, dict) else None
         tp: dict[str, Any] = type_props if isinstance(type_props, dict) else {}
 
         raw_sources = _dicts(tp.get("sources"))
