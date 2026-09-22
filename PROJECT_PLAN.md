@@ -11,7 +11,7 @@ Insights (deterministic only; LLM support removed, see session 13). Remaining wo
 Release Checklist (coverage on core packages, Docker image build verification,
 security review of the upload path, 5 MiB performance check).
 
-**Last updated:** 2026-09-22 (session 19)
+**Last updated:** 2026-09-22 (session 20)
 
 **Verification (session 12):** `ruff check` clean · `ruff format --check` clean ·
 `mypy` clean (47 files) · `pytest` 175 passed (incl. 7 Streamlit `AppTest` smoke
@@ -672,9 +672,16 @@ breaking it.
   treats every sink column as equally important (no notion of "critical"
   outputs). It works on any `ColumnLineageGraph` (data flow, pipeline or
   combined).
-- Expression parser covers the **data-flow** dialect. The **pipeline** dialect
-  only extracts function names and `pipeline().parameters.*` / `parameters('x')`
-  / `variables('x')` references — no column notion there yet.
+- Expression parser covers the **data-flow** dialect fully. The **pipeline**
+  dialect only extracts function names and `pipeline().parameters.*` /
+  `parameters('x')` / `variables('x')` references — this is intentional, not
+  a pending gap: nothing in the app currently calls the pipeline dialect (see
+  session 20), and pipeline-level ADF expressions don't reference dataset
+  columns in the first place (data-flow expressions, which do, are already
+  fully covered). The related, real gap — Copy activities without an explicit
+  `TabularTranslator` (e.g. a custom SQL `source.query`) have no column
+  lineage — is the first bullet above, expanded on in session 20; it would
+  need a SQL column-list extractor, not an expression-parser change.
 - Expression parser is lexical: higher-order functions with iterator vars
   (`reduce`, `mapIndex`, …) and unrecognized characters yield
   `confidence="partial"`; `case()` branch conditions are treated as plain
@@ -995,12 +1002,14 @@ lineage approximate"). Fixture `dataflow_flatten.json`. Total **178** tests.
    checklist review.
 
 Remaining lineage-completeness gaps (lower priority, all correctly flagged
-"Partial"/"Approx." in the compat matrix, not silently wrong): `unpivot`,
-`parse`, `surrogateKey`/`keyGenerate` argument decomposition; `execution_order()`
-doesn't model ForEach loop-iteration or If/Switch branch-exclusivity semantics
-(a loop body and both If branches all appear as one flat DAG); pipeline-dialect
-expression parser only extracts function names + parameter/variable refs, no
-column notion.
+"Partial"/"Approx." in the compat matrix, not silently wrong): `unpivot`
+argument decomposition (`parse`/`surrogateKey` done in session 19; `unpivot`
+deliberately deferred - no documented DFS syntax, see session 19);
+`execution_order()` doesn't model ForEach loop-iteration or If/Switch
+branch-exclusivity semantics (a loop body and both If branches all appear as
+one flat DAG). The "pipeline-dialect expression parser... no column notion"
+item originally listed here was investigated and scoped out in session 20 -
+it wasn't a real gap as framed; see that entry.
 
 ### Session 15 (2026-09-22) — F025 error analyzer: real-error hardening pass
 - The regex classifier in `app/insights/error_analyzer.py` was tested only
@@ -1224,6 +1233,46 @@ deliberately deferred - see below).
 
 **Next recommended task:** the remaining release-checklist item - a ~5 MiB
 synthetic pipeline/data-flow performance benchmark (parse + lineage + combined
-graph, confirm the <2s/<200ms targets in §11) - plus the pipeline-dialect
-expression parser's missing column notion (session 14/16), which is the one
-lineage gap left unaddressed across sessions 14/16/19.
+graph, confirm the <2s/<200ms targets in §11).
+
+### Session 20 (2026-09-22) — Scoped out: pipeline-dialect "column notion"
+
+Investigated the session 14/16 note ("pipeline-dialect expression parser only
+extracts function names + parameter/variable refs, no column notion") before
+building it, the same way `unpivot`'s DFS syntax was checked before being
+attempted in session 19. Conclusion: **as originally framed, it isn't a real
+gap worth closing**, for three concrete reasons found by reading the code
+rather than assuming:
+
+1. **`ExpressionDialect.PIPELINE` is dead code.** Grepped every call site of
+   `analyze_expression()` in the app (seven, all inside
+   `column_lineage.py`/`dfs_script.py`) - all seven pass the default
+   (data-flow) dialect. Nothing anywhere ever constructs
+   `ExpressionParser(ExpressionDialect.PIPELINE)` or calls
+   `analyze_expression(..., dialect=ExpressionDialect.PIPELINE)`. The gap is
+   in a path nothing currently calls.
+2. **Pipeline-level ADF expressions don't reference columns.** `@concat(...)`,
+   `pipeline().parameters.x`, `activity('X').output.y` deal in parameters,
+   variables and activity-output fields - not row-level dataset columns. A
+   "column notion" doesn't map onto anything ADF actually exposes at the
+   pipeline expression level; data-flow expressions (which do reference
+   columns) already have full support via the default dialect.
+3. **The real underlying gap is already documented, and is different work.**
+   §15 already states pipeline column lineage covers Copy activities with an
+   explicit `TabularTranslator` only. A Copy activity that reads via a custom
+   SQL `source.query` instead of a straight table copy has zero lineage today
+   - confirmed by grepping the parsers: `query`/`sqlReaderQuery` is never read
+   anywhere. Closing *that* gap means a narrow, explicitly best-effort SQL
+   `SELECT col1, col2 FROM table` column-list extractor for Copy activity
+   source queries - parsing an embedded SQL dialect, not the ADF `@`-expression
+   language this parser already handles. Meaningfully different (and riskier:
+   real SQL varies far more than ADF's expression grammar - aliases,
+   `SELECT *`, joins, CTEs, quoting conventions) from the parser work already
+   done, so it's called out here as a distinct, separately-scoped future
+   feature rather than folded into "pipeline dialect column notion" - not
+   attempted this session.
+
+**Decision:** drop "pipeline-dialect column notion" from the active gap list.
+If Copy-activity-without-translator lineage is wanted later, scope it as the
+SQL `source.query` column extractor described above, not as an expression
+parser enhancement.

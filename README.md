@@ -84,7 +84,7 @@ performance benchmark).
 | Data flow `unpivot` / … | Partial | Recognized and kept; arguments not yet decomposed (passthrough approximation) - no documented Data Flow Script syntax found to decompose against safely |
 | Unknown data flow operators | Yes | Flagged as a warning, kept, never fatal |
 | Expressions — data-flow dialect | Yes | Referenced columns resolved (`concat`, `iif`, `isNull`, `toString`, `substring`, `sum`, `byName`, `stream@col`, `$param`); unsupported → "Unable to determine automatically" |
-| Expressions — pipeline dialect (`@concat`, `pipeline().parameters.x`) | Partial | Function names + parameter/variable references only |
+| Expressions — pipeline dialect (`@concat`, `pipeline().parameters.x`) | N/A | Function names + parameter/variable references only, by design — nothing in the app currently analyzes pipeline-level expressions, and they don't reference dataset columns (see PROJECT_PLAN.md session 20) |
 | Higher-order expressions (`reduce`, `mapIndex`, …) | Partial | Flagged; column dependencies may be incomplete |
 | Column-level lineage graph (Mapping Data Flow) | Yes | source→sink column graph; direct / rename / derived / join-key / lookup / aggregate / filter / union / split / window relationships |
 | Upstream / downstream traversal + "explain" narrative | Yes | origin, journey steps, downstream columns, sinks reached |
