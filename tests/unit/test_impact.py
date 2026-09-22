@@ -2,7 +2,9 @@ import json
 
 import pytest
 from app.lineage import analyze_impact, build_data_flow_lineage
+from app.lineage.graph import ColumnLineageGraph
 from app.models.impact import ImpactLevel
+from app.models.lineage import NodeKind, RelationshipType
 from app.parsers.dataflow_parser import DataFlowParser
 
 
@@ -92,6 +94,52 @@ def test_summary_text_for_terminal_and_non_terminal(impact_for):
     assert "HIGH" in text
     assert "sink column(s)" in text
     assert active.downstream_column_count == len(active.all_downstream)
+
+
+def test_gate_elsewhere_in_blast_radius_does_not_inflate_a_clean_sink_path():
+    """A join/split must sit ON the path to an affected sink to justify HIGH.
+
+    Previously ``_level()`` only checked "is there a sink reached at all" and
+    "is there a join/split transformation anywhere in the downstream set" as
+    two independent facts, so a column with one clean, gate-free path to its
+    sink was marked HIGH purely because it *also* fed an unrelated join that
+    dead-ends without ever reaching a sink.
+    """
+    g = ColumnLineageGraph()
+    g.register_stream("Src", "source")
+    g.register_stream("Sink1", "sink")
+    g.add_column("Src", "a", NodeKind.SOURCE_COLUMN)
+    g.add_column("Sink1", "a", NodeKind.SINK_COLUMN)
+    g.add_dependency("Src", "a", "Sink1", "a", relationship=RelationshipType.DIRECT)
+
+    # Dead-end join: shares the source column but never reaches a sink.
+    g.register_stream("JoinX", "transformation", operator="join")
+    g.add_column("Src", "b", NodeKind.SOURCE_COLUMN)
+    g.add_column("JoinX", "b", NodeKind.OUTPUT_COLUMN)
+    g.add_dependency("Src", "a", "JoinX", "b", relationship=RelationshipType.JOIN_KEY)
+    g.add_dependency("Src", "b", "JoinX", "b", relationship=RelationshipType.JOIN_KEY)
+
+    report = analyze_impact(g, "Src::a")
+    assert report.level is ImpactLevel.MEDIUM
+    assert report.critical_path == ("Src::a", "Sink1::a")
+
+
+def test_gate_actually_on_the_path_to_a_sink_is_high():
+    g = ColumnLineageGraph()
+    g.register_stream("Src", "source")
+    g.register_stream("Select1", "transformation", operator="select")
+    g.register_stream("JoinX", "transformation", operator="join")
+    g.register_stream("Sink1", "sink")
+    g.add_column("Src", "a", NodeKind.SOURCE_COLUMN)
+    g.add_column("Select1", "a", NodeKind.OUTPUT_COLUMN)
+    g.add_column("JoinX", "a", NodeKind.OUTPUT_COLUMN)
+    g.add_column("Sink1", "joined_a", NodeKind.SINK_COLUMN)
+    g.add_dependency("Src", "a", "Select1", "a", relationship=RelationshipType.DIRECT)
+    g.add_dependency("Select1", "a", "JoinX", "a", relationship=RelationshipType.JOIN_KEY)
+    g.add_dependency("JoinX", "a", "Sink1", "joined_a", relationship=RelationshipType.DIRECT)
+
+    report = analyze_impact(g, "Src::a")
+    assert report.level is ImpactLevel.HIGH
 
 
 def test_unknown_node_raises(read_fixture_bytes):

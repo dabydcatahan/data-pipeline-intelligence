@@ -143,6 +143,10 @@ def analyze_impact(graph: ColumnLineageGraph, node_id: str) -> ImpactReport:
     depth = _longest_downstream_path(g, node_id, downstream)
     affected_stream_names = tuple(sorted(s for s in affected_streams if s != node.stream))
     critical_path = _critical_path(g, node_id, sink_columns)
+    sink_reached_through_gate = any(
+        g.edges[critical_path[i], critical_path[i + 1]]["relationship"] in _GATE_RELATIONSHIPS
+        for i in range(len(critical_path) - 1)
+    )
 
     # ------------------------------------------------------------------ score
     parts = [
@@ -167,7 +171,7 @@ def analyze_impact(graph: ColumnLineageGraph, node_id: str) -> ImpactReport:
         if count
     ]
 
-    level = _level(score, sink_columns, joins, splits, bool(downstream))
+    level = _level(score, sink_columns, sink_reached_through_gate, bool(downstream))
     factors.append(f"raw score {raw} -> {min(100, raw)} -> {level.label}")
 
     return ImpactReport(
@@ -230,13 +234,12 @@ def _critical_path(g: nx.DiGraph, node_id: str, sink_columns: list[str]) -> tupl
 def _level(
     score: int,
     sink_columns: list[str],
-    joins: list[str],
-    splits: list[str],
+    sink_reached_through_gate: bool,
     has_downstream: bool,
 ) -> ImpactLevel:
     if not has_downstream:
         return ImpactLevel.LOW
-    if sink_columns and (joins or splits):
+    if sink_columns and sink_reached_through_gate:
         return ImpactLevel.HIGH
     if len(sink_columns) >= 3 or score >= HIGH_THRESHOLD:
         return ImpactLevel.HIGH
