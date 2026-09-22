@@ -46,7 +46,11 @@ def test_pipeline_docx_is_a_valid_zip_package(read_fixture_bytes):
 
 def test_pipeline_docx_has_expected_sections_and_data(read_fixture_bytes):
     document = _open(pipeline_docx(_pipeline(read_fixture_bytes, "pipeline_multi_activity.json")))
-    headings = [p.text for p in document.paragraphs if p.style.name in ("Title", *[f"Heading {i}" for i in range(1, 4)])]
+    headings = [
+        p.text
+        for p in document.paragraphs
+        if p.style.name in ("Title", *[f"Heading {i}" for i in range(1, 4)])
+    ]
     assert headings[0] == "CustomerLoad"
     for expected in (
         "Plain-English Summary",
@@ -59,8 +63,17 @@ def test_pipeline_docx_has_expected_sections_and_data(read_fixture_bytes):
     ):
         assert expected in headings
 
+    activities_header = [
+        "Name",
+        "Type",
+        "Container",
+        "Depends on",
+        "Inputs",
+        "Outputs",
+        "Data flow",
+    ]
     activities_table = next(
-        t for t in document.tables if [c.text for c in t.rows[0].cells][:2] == ["Name", "Type"]
+        t for t in document.tables if [c.text for c in t.rows[0].cells] == activities_header
     )
     names = [row.cells[0].text for row in activities_table.rows[1:]]
     assert "CopyRaw" in names and "TransformCustomer" in names
@@ -68,8 +81,17 @@ def test_pipeline_docx_has_expected_sections_and_data(read_fixture_bytes):
 
 def test_pipeline_docx_shows_nested_activity_container(read_fixture_bytes):
     document = _open(pipeline_docx(_pipeline(read_fixture_bytes, "pipeline_control_flow.json")))
+    activities_header = [
+        "Name",
+        "Type",
+        "Container",
+        "Depends on",
+        "Inputs",
+        "Outputs",
+        "Data flow",
+    ]
     activities_table = next(
-        t for t in document.tables if [c.text for c in t.rows[0].cells][:2] == ["Name", "Type"]
+        t for t in document.tables if [c.text for c in t.rows[0].cells] == activities_header
     )
     rows = {row.cells[0].text: [c.text for c in row.cells] for row in activities_table.rows[1:]}
     assert rows["CopyRegionRaw"][2] == "ForEachRegion (loop)"
@@ -78,7 +100,9 @@ def test_pipeline_docx_shows_nested_activity_container(read_fixture_bytes):
 
 
 def test_pipeline_docx_does_not_leak_scrubbed_secrets(read_fixture_bytes):
-    text = _all_text(_open(pipeline_docx(_pipeline(read_fixture_bytes, "pipeline_multi_activity.json"))))
+    text = _all_text(
+        _open(pipeline_docx(_pipeline(read_fixture_bytes, "pipeline_multi_activity.json")))
+    )
     assert "Password" not in text
     assert "connectionString" not in text
 
@@ -102,7 +126,8 @@ def test_data_flow_docx_with_lineage(read_fixture_bytes):
     lineage_table = next(
         t
         for t in document.tables
-        if [c.text for c in t.rows[0].cells] == ["Sink column", "Originating source column(s)", "Transformations"]
+        if [c.text for c in t.rows[0].cells]
+        == ["Sink column", "Originating source column(s)", "Transformations"]
     )
     rows = {row.cells[0].text: row.cells[1].text for row in lineage_table.rows[1:]}
     assert rows["CustomerSink.cust_key"] == "CustomerSource.customer_id"
@@ -127,7 +152,7 @@ def test_docx_has_table_of_contents_field_and_page_numbers(read_fixture_bytes):
         footer_xml = z.read("word/footer1.xml").decode("utf-8")
     assert 'TOC \\o "1-3"' in document_xml
     assert "updateFields" in settings_xml
-    assert '>PAGE<' in footer_xml or "PAGE" in footer_xml
+    assert ">PAGE<" in footer_xml or "PAGE" in footer_xml
 
 
 def test_docx_is_deterministic(read_fixture_bytes):

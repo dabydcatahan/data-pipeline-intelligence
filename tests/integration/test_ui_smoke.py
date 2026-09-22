@@ -237,7 +237,7 @@ def test_documentation_page_renders_and_offers_download():
     assert "Mapping Data Flow: CustomerEnrichFlow" in body
 
     # switch to HTML export
-    fmt = next(r for r in at.radio if set(r.options) == {"Markdown", "HTML"})
+    fmt = next(r for r in at.radio if set(r.options) == {"Markdown", "HTML", "Word (.docx)"})
     fmt.set_value("HTML").run()
     assert not at.exception
     assert any(b.label == "Download .html" for b in at.download_button)
