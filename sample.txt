@@ -1,0 +1,122 @@
+{
+  "errorCode": "DFSchemaMismatch",
+  "message": "Column 'agreement_regulation_esg__transitional_activity_flag' was not found in source dataset."
+}
+
+
+{
+  "errorCode": "DataFlowJoinError",
+  "message": "Join key column 'grid_id' not found."
+}
+
+
+{
+  "errorCode": "DFExpressionError",
+  "message": "Cannot convert value 'ABC123' to Decimal(10,0)."
+}
+
+
+{
+  "errorCode": "SqlTimeout",
+  "message": "Execution Timeout Expired. Query execution took longer than configured timeout."
+}
+
+===========================
+
+{
+  "errorCode": "DFExecutorUserError",
+  "message": "Spark executor lost. Insufficient memory available for execution."
+}
+
+{
+  "errorCode": "403",
+  "message": "This request is not authorized to perform this operation."
+}
+
+{
+  "errorCode": "SqlOperationFailed",
+  "message": "Invalid object name 'exdl.wb_ing_esg_kpi_detail'."
+}
+
+{
+  "errorCode": "ParquetWriterError",
+  "message": "Failed to write parquet file. Path already exists and cannot be overwritten."
+}
+
+{
+  "errorCode": "DFParameterError",
+  "message": "Parameter 'bsn_eff_dt' cannot be null."
+}
+
+{
+  "errorCode": "ArrayIndexOutOfBounds",
+  "message": "Index 1 does not exist in array generated from split()."
+}
+
+{
+  "errorCode": "BusinessValidationError",
+  "message": "Unexpected increase in LoanIQ outlier count. Expected <100 records but received 25,431."
+}
+
+
+UserErrorFileNotFound
+DFSchemaMismatch
+SqlOperationFailed
+DFExpressionError
+DFCastingError
+ArrayIndexOutOfBounds
+403 Permission Error
+DFExecutorUserError
+ParquetWriterError
+BusinessValidationError
+
+{
+  "errorCode": "JoinCardinalityError",
+  "message": "Join operation produced unexpected row multiplication. Input records: 102,341. Output records: 15,402,889."
+}
+
+{
+  "errorCode": "SparkBroadcastError",
+  "message": "Broadcast join exceeded memory threshold."
+}
+
+{
+  "errorCode": "SchemaInferenceError",
+  "message": "Column 'reporting_amount' contains decimal and string values."
+}
+
+{
+  "errorCode": "StringParsingError",
+  "message": "Expected delimiter '~' not found in alternate_contract_reference."
+}
+
+{
+  "errorCode": "DateConversionError",
+  "message": "Unable to convert '31-DEC-ABC' into date."
+}
+
+{
+  "errorCode": "DatabaseUnavailable",
+  "message": "Could not open connection to SQL endpoint."
+}
+
+
+{
+  "errorCode": "SqlPermissionDenied",
+  "message": "SELECT permission denied on object wb_ing_esg_kpi_detail."
+}
+
+{
+  "errorCode": "SparkExecutorLost",
+  "message": "Executor 4 exited unexpectedly."
+}
+
+{
+  "errorCode": "ParameterValidationError",
+  "message": "bsn_eff_dt is not in YYYY-MM-DD format."
+}
+
+{
+  "errorCode": "PathValidationError",
+  "message": "facility_agreement_directory parameter is empty."
+}
