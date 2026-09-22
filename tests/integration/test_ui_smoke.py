@@ -50,6 +50,87 @@ def test_upload_page_paste_json_ingests_an_artifact():
     assert "CopyCustomerPipeline" in names
 
 
+def test_upload_page_paste_matches_file_upload_byte_for_byte():
+    """Paste and file-upload share `_ingest_one` -> `AnalysisService.analyze_upload`;
+    this pins that a pasted data flow parses identically to the same bytes uploaded
+    as a file (same transformation count, same content hash)."""
+    from app.services.analysis_service import AnalysisService
+
+    text = (FIXTURES / "dataflow_customer_full.json").read_text()
+    file_artifact = AnalysisService().analyze_upload(
+        "dataflow_customer_full.json", text.encode("utf-8")
+    )
+
+    at = AppTest.from_file(APP, default_timeout=30)
+    at.run()
+    at.sidebar.radio[0].set_value("Upload").run()
+    at.text_area[0].set_value(text).run()
+    next(b for b in at.button if b.label == "Analyze pasted JSON").click().run()
+
+    assert not at.exception
+    (pasted,) = at.session_state["session"].artifacts
+    assert pasted.content_sha256 == file_artifact.content_sha256
+    assert pasted.name == file_artifact.name == "CustomerEnrichFlow"
+    assert len(pasted.data_flow.transformations) == len(file_artifact.data_flow.transformations)
+
+
+def test_upload_page_paste_name_field_only_sets_source_filename():
+    """The optional 'Name' field must not leak into the artifact's identity - that
+    comes from the JSON content itself, same as a real ADF export would have it."""
+    at = AppTest.from_file(APP, default_timeout=30)
+    at.run()
+    at.sidebar.radio[0].set_value("Upload").run()
+
+    at.text_input[0].set_value("not-the-real-name").run()
+    text = (FIXTURES / "pipeline_copy_direct.json").read_text()
+    at.text_area[0].set_value(text).run()
+    next(b for b in at.button if b.label == "Analyze pasted JSON").click().run()
+
+    assert not at.exception
+    (artifact,) = at.session_state["session"].artifacts
+    assert artifact.name == "CopyCustomerPipeline"
+    assert artifact.source_filename == "not-the-real-name.json"
+
+
+def test_upload_page_paste_invalid_json_shows_error_not_crash():
+    at = AppTest.from_file(APP, default_timeout=30)
+    at.run()
+    at.sidebar.radio[0].set_value("Upload").run()
+
+    at.text_area[0].set_value("{not valid json,,,").run()
+    next(b for b in at.button if b.label == "Analyze pasted JSON").click().run()
+
+    assert not at.exception
+    assert at.session_state["session"].artifacts == []
+    assert "pasted.json" in at.session_state["session"].failures
+    assert any("not valid JSON" in e.value for e in at.error)
+
+
+def test_upload_page_paste_unsupported_artifact_shows_error_not_crash():
+    at = AppTest.from_file(APP, default_timeout=30)
+    at.run()
+    at.sidebar.radio[0].set_value("Upload").run()
+
+    at.text_area[0].set_value('{"name": "SomeDataset", "properties": {"type": "AzureBlob"}}').run()
+    next(b for b in at.button if b.label == "Analyze pasted JSON").click().run()
+
+    assert not at.exception
+    assert at.session_state["session"].artifacts == []
+    assert "not a recognised ADF Pipeline" in at.session_state["session"].failures["pasted.json"]
+
+
+def test_upload_page_paste_empty_text_is_a_no_op():
+    at = AppTest.from_file(APP, default_timeout=30)
+    at.run()
+    at.sidebar.radio[0].set_value("Upload").run()
+
+    next(b for b in at.button if b.label == "Analyze pasted JSON").click().run()
+
+    assert not at.exception
+    assert at.session_state["session"].artifacts == []
+    assert any("paste some JSON" in w.value for w in at.warning)
+
+
 def test_upload_page_can_remove_and_clear_artifacts():
     at = AppTest.from_file(APP, default_timeout=30)
     at.run()

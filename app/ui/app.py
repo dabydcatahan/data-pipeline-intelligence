@@ -617,7 +617,7 @@ def page_documentation(service: AnalysisService, session: AnalysisSession) -> No
         st.warning("This artifact type has no documentation generator.")
         return
 
-    fmt = st.radio("Format", ["Markdown", "HTML"], horizontal=True)
+    fmt = st.radio("Format", ["Markdown", "HTML", "Word (.docx)"], horizontal=True)
     if fmt == "HTML":
         html = service.export_html(markdown, title=picked.name)
         st.download_button(
@@ -627,6 +627,34 @@ def page_documentation(service: AnalysisService, session: AnalysisSession) -> No
             mime="text/html",
         )
         st.code(html, language="html")
+    elif fmt == "Word (.docx)":
+        if not service.docx_export_available():
+            st.info(
+                "Word export needs the optional `docx` extra: "
+                "`pip install 'data-pipeline-intelligence[docx]'`, then restart the app."
+            )
+        else:
+            try:
+                if picked.pipeline is not None:
+                    docx_bytes = service.document_pipeline_docx(picked.pipeline)
+                else:
+                    docx_bytes = service.document_data_flow_docx(
+                        picked, session=session, include_lineage=include_lineage
+                    )
+            except Exception as e:
+                st.error(f"Could not generate the Word document: {e}")
+            else:
+                st.download_button(
+                    "Download .docx",
+                    docx_bytes,
+                    file_name=f"{picked.name}.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
+                st.caption(
+                    "Styled Word document: title page, table of contents (right-click → "
+                    "Update Field in Word to populate it), and the same content as the "
+                    "Markdown/HTML export."
+                )
     else:
         st.download_button(
             "Download .md",

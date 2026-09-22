@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from app.core.config import AppSettings, get_settings
 from app.core.exceptions import ADFIntelligenceError, UnsupportedArtifactError
 from app.core.logging import get_logger
+from app.documentation.docx_export import data_flow_docx, pipeline_docx
 from app.documentation.export import render_html
 from app.documentation.generator import data_flow_markdown, pipeline_markdown
 from app.insights import (
@@ -439,6 +441,29 @@ class AnalysisService:
     def export_html(markdown: str, *, title: str) -> str:
         """Wrap generated Markdown documentation in a standalone HTML page (F018)."""
         return render_html(markdown, title=title)
+
+    @staticmethod
+    def docx_export_available() -> bool:
+        """Whether the optional 'docx' extra (python-docx) is installed."""
+        return importlib.util.find_spec("docx") is not None
+
+    @staticmethod
+    def document_pipeline_docx(pipeline: Pipeline) -> bytes:
+        """Styled Word (.docx) documentation for a pipeline. Needs the 'docx' extra."""
+        return pipeline_docx(pipeline)
+
+    def document_data_flow_docx(
+        self,
+        artifact: ParsedArtifact,
+        *,
+        session: AnalysisSession | None = None,
+        include_lineage: bool = True,
+    ) -> bytes:
+        """Styled Word (.docx) documentation for a data flow. Needs the 'docx' extra."""
+        if artifact.data_flow is None:
+            raise ValueError(f"Artifact '{artifact.name}' is not a Mapping Data Flow.")
+        lineage = self.data_flow_lineage(artifact, session=session) if include_lineage else None
+        return data_flow_docx(artifact.data_flow, lineage)
 
     # ------------------------------------------------------------- insights
     @property
