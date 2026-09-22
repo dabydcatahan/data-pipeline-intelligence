@@ -11,7 +11,7 @@ Insights (deterministic only; LLM support removed, see session 13). Remaining wo
 Release Checklist (coverage on core packages, Docker image build verification,
 security review of the upload path, 5 MiB performance check).
 
-**Last updated:** 2026-09-22 (session 16)
+**Last updated:** 2026-09-22 (session 17)
 
 **Verification (session 12):** `ruff check` clean · `ruff format --check` clean ·
 `mypy` clean (47 files) · `pytest` 175 passed (incl. 7 Streamlit `AppTest` smoke
@@ -1080,3 +1080,50 @@ misleading.
   fall through to the generic "trace complete lineage path" checkpoint.
 - Full suite green (262 tests), `mypy app` / `ruff check` / `ruff format --check`
   all clean.
+
+(Undocumented at the time: a `.docx` export feature was also added this same
+session - `app/documentation/docx_export.py`, wired into `AnalysisService` and
+the Documentation page's "Word (.docx)" format option - styled title page,
+auto-updating TOC field, bordered/banded tables, code-styled expression/trace
+blocks, page-numbered footer; optional `docx` extra, same lazy-import pattern
+as pyvis. Backfilled here since it landed without a session write-up.)
+
+### Session 17 (2026-09-22) — Real internal ADF error samples
+
+Incorporated a batch of real error samples reported by the team (18 full
+messages + 10 bare internal alerting-tool codes like `DFSchemaMismatch`,
+`BusinessValidationError` with no message text). All 27/27 were `unknown_error`
+before this session; all classify correctly now.
+
+- Added ~30 new patterns across existing categories: `resource_exhausted`
+  (`executor lost`, `executor ... exited unexpectedly`, `broadcast ...
+  exceeded/threshold`), `path_access_denied` (`not authorized to perform this
+  operation` without requiring literal "forbidden"/"403"; `permission denied
+  (for|on) (table|relation|schema|database|object)` - broadened from
+  table/relation/schema/database only), `sink_write_failed` (`path already
+  exists and cannot be overwritten`), `null_constraint_violation` (`parameter
+  ... cannot be null`, `parameter is empty`), `invalid_expression` (`does not
+  exist in array`), `type_conversion_error` (`unable to convert`),
+  `format_error` (`expected delimiter ... not found`, `is not in ... format`),
+  `connection_failed` (`could not open connection to`, `database unavailable`),
+  `schema_mismatch` (`contains \w+ and \w+ values` - mixed-type column
+  inference), `join_mismatch` (`row multiplication` - cardinality/fan-out,
+  distinct from a join that fails outright).
+- New `business_validation_error` type: a custom data-quality/business-rule
+  threshold breach (e.g. "Unexpected increase in LoanIQ outlier count.
+  Expected <100 records but received 25,431") is fundamentally different from
+  every other category here - the pipeline ran *correctly*; the source data is
+  what's flagged. Its checkpoint says so explicitly ("review the source data
+  ... this isn't a pipeline bug") rather than pointing at lineage tracing,
+  same principle as the session 16 infra types.
+- New `custom_codes` pattern group (lowest priority, checked last): bare
+  internal alerting-tool codes matched on their own when no message text is
+  present, e.g. `DFExecutorUserError` -> `resource_exhausted`,
+  `ArrayIndexOutOfBounds` -> `invalid_expression`. A real message with more
+  specific wording always wins first since this group sits at the end of
+  `error_patterns.json`.
+- `error_patterns.json`: 108 -> 137 patterns, 33 -> 34 error types. Tests:
+  27 new parametrized cases in `test_error_analyzer.py` plus a check that
+  `business_validation_error` gets its own checkpoint, not the generic
+  lineage-trace fallback. Full suite green, `mypy app` / `ruff check` /
+  `ruff format --check` all clean.

@@ -346,6 +346,72 @@ REAL_WORLD_ERRORS_DATABASES_AND_INFRA = [
     ("Debug session has expired. Please restart data flow debug.", "debug_session_error"),
 ]
 
+# Real internal ADF error samples reported live by the team (including custom
+# alerting-tool error codes like "DFSchemaMismatch" pasted with no message text).
+REAL_WORLD_ERRORS_INTERNAL_SAMPLES = [
+    (
+        "Spark executor lost. Insufficient memory available for execution.",
+        "resource_exhausted",
+    ),
+    ("This request is not authorized to perform this operation.", "path_access_denied"),
+    ("Invalid object name 'exdl.wb_ing_esg_kpi_detail'.", "dataset_not_found"),
+    (
+        "Failed to write parquet file. Path already exists and cannot be overwritten.",
+        "sink_write_failed",
+    ),
+    ("Parameter 'bsn_eff_dt' cannot be null.", "null_constraint_violation"),
+    ("Index 1 does not exist in array generated from split().", "invalid_expression"),
+    (
+        "Unexpected increase in LoanIQ outlier count. Expected <100 records but received 25,431.",
+        "business_validation_error",
+    ),
+    (
+        "Join operation produced unexpected row multiplication. Input records: 102,341. "
+        "Output records: 15,402,889.",
+        "join_mismatch",
+    ),
+    ("Broadcast join exceeded memory threshold.", "resource_exhausted"),
+    ("Column 'reporting_amount' contains decimal and string values.", "schema_mismatch"),
+    ("Expected delimiter '~' not found in alternate_contract_reference.", "format_error"),
+    ("Unable to convert '31-DEC-ABC' into date.", "type_conversion_error"),
+    ("Could not open connection to SQL endpoint.", "connection_failed"),
+    ("SELECT permission denied on object wb_ing_esg_kpi_detail.", "path_access_denied"),
+    ("Executor 4 exited unexpectedly.", "resource_exhausted"),
+    ("bsn_eff_dt is not in YYYY-MM-DD format.", "format_error"),
+    ("facility_agreement_directory parameter is empty.", "null_constraint_violation"),
+    # Bare custom error codes, no message text
+    ("UserErrorFileNotFound", "path_not_found"),
+    ("DFSchemaMismatch", "schema_mismatch"),
+    ("SqlOperationFailed", "sink_write_failed"),
+    ("DFExpressionError", "invalid_expression"),
+    ("DFCastingError", "type_conversion_error"),
+    ("ArrayIndexOutOfBounds", "invalid_expression"),
+    ("403 Permission Error", "path_access_denied"),
+    ("DFExecutorUserError", "resource_exhausted"),
+    ("ParquetWriterError", "sink_write_failed"),
+    ("BusinessValidationError", "business_validation_error"),
+]
+
+
+@pytest.mark.parametrize("error_text,expected_type", REAL_WORLD_ERRORS_INTERNAL_SAMPLES)
+def test_internal_sample_error_is_classified(error_text: str, expected_type: str) -> None:
+    result = analyze_error(error_text)
+    assert result.inferred_error_type == expected_type
+    assert result.severity != ErrorSeverity.INFO
+    assert len(result.lineage_checkpoints) > 0
+
+
+def test_business_validation_error_gets_a_data_review_checkpoint_not_lineage_tracing():
+    """A business-rule threshold breach means the pipeline ran correctly - the data
+    itself is what's flagged - so its checkpoint must not be the generic lineage-trace
+    fallback, same principle as the other infra-flavored error types."""
+    result = analyze_error(
+        "Unexpected increase in LoanIQ outlier count. Expected <100 records but received 25,431."
+    )
+    assert result.lineage_checkpoints[0].description != (
+        "Trace complete lineage path from source to sink"
+    )
+
 
 @pytest.mark.parametrize("error_text,expected_type", REAL_WORLD_ERRORS)
 def test_real_world_error_is_classified(error_text: str, expected_type: str) -> None:

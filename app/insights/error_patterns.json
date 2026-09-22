@@ -1,5 +1,5 @@
 {
-  "_readme": "Data-driven error classification for the F025 error analyzer (app/insights/error_analyzer.py). Add a new pattern here - no Python code or redeploy needed for the regex/severity/summary/next-steps part. Checkpoint generation (what to inspect in the lineage graph) is separate, code-based logic in _generate_checkpoints(); an error_type with no matching branch there still gets a safe generic checkpoint. 'patterns' order matters: the FIRST regex that matches wins, so more specific patterns must come before generic ones. All regexes are matched case-insensitively against the lowercased error text.",
+  "_readme": "Data-driven error classification for the F025 error analyzer (app/insights/error_analyzer.py). Add a new pattern here - no Python code or redeploy needed for the regex/severity/summary/next-steps part. Checkpoint generation (what to inspect in the lineage graph) is separate, code-based logic in _generate_checkpoints(); an error_type with no matching branch there still gets a safe generic checkpoint. 'patterns' order matters: the FIRST regex that matches wins, so more specific patterns must come before generic ones. All regexes are matched case-insensitively against the lowercased error text. The 'custom_codes' group at the end matches bare internal/alerting-tool error codes (e.g. a monitoring dashboard showing just 'DFSchemaMismatch' with no message text) - kept lowest priority so a real message with more specific wording always wins first.",
   "patterns": [
     { "group": "runtime", "regex": "staging blob not accessible", "error_type": "staging_blob_not_accessible", "severity": "critical" },
     { "group": "runtime", "regex": "column length validation error", "error_type": "column_length_exceeded", "severity": "error" },
@@ -8,6 +8,8 @@
     { "group": "runtime", "regex": "(no matching records found).*lookup", "error_type": "lookup_failed", "severity": "error" },
     { "group": "runtime", "regex": "(spark operation|spark.*failed)", "error_type": "spark_operation_failed", "severity": "error" },
     { "group": "runtime", "regex": "a value error was found.*field", "error_type": "value_error", "severity": "error" },
+    { "group": "runtime", "regex": "executor (lost|.*exited unexpectedly)", "error_type": "resource_exhausted", "severity": "error" },
+    { "group": "runtime", "regex": "broadcast.*(exceeded|threshold)", "error_type": "resource_exhausted", "severity": "error" },
 
     { "group": "missing_column_specific", "regex": "column mapping cannot be found", "error_type": "missing_column", "severity": "critical" },
     { "group": "missing_column_specific", "regex": "invalid column name", "error_type": "missing_column", "severity": "error" },
@@ -21,6 +23,7 @@
     { "group": "type_conversion", "regex": "convert(ing)?.*(failed|invalid character)", "error_type": "type_conversion_error", "severity": "error" },
     { "group": "type_conversion", "regex": "(cannot convert|invalid cast|type conversion)", "error_type": "type_conversion_error", "severity": "error" },
     { "group": "type_conversion", "regex": "type of parameter matches with type of value", "error_type": "type_conversion_error", "severity": "error" },
+    { "group": "type_conversion", "regex": "unable to convert", "error_type": "type_conversion_error", "severity": "error" },
     { "group": "type_conversion", "regex": "(varchar|string|integer|numeric|decimal).*incompatible", "error_type": "incompatible_type", "severity": "error" },
 
     { "group": "missing_column_generic", "regex": "(column|field).*not found", "error_type": "missing_column", "severity": "error" },
@@ -31,12 +34,16 @@
     { "group": "null", "regex": "(null|empty|blank).*not allow", "error_type": "null_constraint_violation", "severity": "error" },
     { "group": "null", "regex": "does not allow nulls?", "error_type": "null_constraint_violation", "severity": "error" },
     { "group": "null", "regex": "violates not-null constraint", "error_type": "null_constraint_violation", "severity": "error" },
+    { "group": "null", "regex": "parameter.*cannot be null", "error_type": "null_constraint_violation", "severity": "error" },
+    { "group": "null", "regex": "parameter (is empty|.*is required)", "error_type": "null_constraint_violation", "severity": "error" },
     { "group": "null", "regex": "(null|undefined|missing).*value", "error_type": "null_value_encountered", "severity": "warning" },
 
     { "group": "row_data", "regex": "foreign key constraint", "error_type": "foreign_key_violation", "severity": "error" },
     { "group": "row_data", "regex": "(row|record).*rejected", "error_type": "row_rejected", "severity": "error" },
     { "group": "row_data", "regex": "(duplicate|unique|primary key)", "error_type": "duplicate_key_violation", "severity": "error" },
     { "group": "row_data", "regex": "(no matching record|join).*failed", "error_type": "join_mismatch", "severity": "error" },
+    { "group": "row_data", "regex": "row multiplication", "error_type": "join_mismatch", "severity": "error" },
+    { "group": "row_data", "regex": "(unexpected increase in|records? but received)", "error_type": "business_validation_error", "severity": "warning" },
 
     { "group": "expression", "regex": "(expression|script|dsl).*(cannot be parsed|parsing error)", "error_type": "invalid_expression", "severity": "error" },
     { "group": "expression", "regex": "(expression|formula).*invalid", "error_type": "invalid_expression", "severity": "error" },
@@ -44,11 +51,14 @@
     { "group": "expression", "regex": "divide by zero", "error_type": "division_by_zero", "severity": "error" },
     { "group": "expression", "regex": "incorrect syntax near", "error_type": "invalid_expression", "severity": "error" },
     { "group": "expression", "regex": "syntax error at or near", "error_type": "invalid_expression", "severity": "error" },
+    { "group": "expression", "regex": "does not exist in array", "error_type": "invalid_expression", "severity": "error" },
 
     { "group": "encoding_format", "regex": "(encoding|charset|unicode).*invalid", "error_type": "encoding_error", "severity": "error" },
     { "group": "encoding_format", "regex": "json parsing error", "error_type": "format_error", "severity": "error" },
     { "group": "encoding_format", "regex": "no enum constant|field ended by", "error_type": "format_error", "severity": "error" },
     { "group": "encoding_format", "regex": "column name is invalid", "error_type": "format_error", "severity": "error" },
+    { "group": "encoding_format", "regex": "expected delimiter.*not found", "error_type": "format_error", "severity": "error" },
+    { "group": "encoding_format", "regex": "is not in .*format", "error_type": "format_error", "severity": "error" },
     { "group": "encoding_format", "regex": "(invalid format|malformed)", "error_type": "format_error", "severity": "error" },
 
     { "group": "truncation", "regex": "string or binary data would be truncated", "error_type": "column_length_exceeded", "severity": "error" },
@@ -62,6 +72,7 @@
     { "group": "schema", "regex": "is not match given column type", "error_type": "schema_mismatch", "severity": "error" },
     { "group": "schema", "regex": "schema validation failed", "error_type": "schema_mismatch", "severity": "error" },
     { "group": "schema", "regex": "does not match (the )?(target |sink )?schema", "error_type": "schema_mismatch", "severity": "error" },
+    { "group": "schema", "regex": "contains \\w+ and \\w+ values", "error_type": "schema_mismatch", "severity": "error" },
 
     { "group": "throttling_resource", "regex": "(throttl|substantial concurrent)", "error_type": "throttling_error", "severity": "warning" },
     { "group": "throttling_resource", "regex": "(out of memory|ran (into|out of) memory|oom\\b)", "error_type": "resource_exhausted", "severity": "error" },
@@ -109,6 +120,8 @@
     { "group": "connection", "regex": "no pg_hba\\.conf entry", "error_type": "connection_failed", "severity": "error" },
     { "group": "connection", "regex": "connection refused", "error_type": "connection_failed", "severity": "error" },
     { "group": "connection", "regex": "access denied for user", "error_type": "connection_failed", "severity": "error" },
+    { "group": "connection", "regex": "could not open connection to", "error_type": "connection_failed", "severity": "error" },
+    { "group": "connection", "regex": "database unavailable", "error_type": "connection_failed", "severity": "error" },
     { "group": "connection", "regex": "(connection|link).*failed", "error_type": "connection_failed", "severity": "error" },
 
     { "group": "file_path", "regex": "does not resolve to any files", "error_type": "path_not_found", "severity": "critical" },
@@ -117,15 +130,32 @@
     { "group": "file_path", "regex": "404.*head", "error_type": "path_not_found", "severity": "critical" },
     { "group": "file_path", "regex": "specified path does not exist", "error_type": "path_not_found", "severity": "critical" },
     { "group": "file_path", "regex": "(forbidden|403).*not authorized", "error_type": "path_access_denied", "severity": "critical" },
-    { "group": "file_path", "regex": "permission denied for (table|relation|schema|database)", "error_type": "path_access_denied", "severity": "error" },
+    { "group": "file_path", "regex": "not authorized to perform this operation", "error_type": "path_access_denied", "severity": "critical" },
+    { "group": "file_path", "regex": "permission denied (for|on) (table|relation|schema|database|object)", "error_type": "path_access_denied", "severity": "error" },
     { "group": "file_path", "regex": "insufficient privilege", "error_type": "path_access_denied", "severity": "error" },
     { "group": "file_path", "regex": "(access denied|permission denied|unauthorized).*path", "error_type": "path_access_denied", "severity": "critical" },
+    { "group": "file_path", "regex": "path already exists and cannot be overwritten", "error_type": "sink_write_failed", "severity": "error" },
     { "group": "file_path", "regex": "(sink|dataset).*operation failed", "error_type": "sink_write_failed", "severity": "critical" },
 
     { "group": "parquet", "regex": "is not a valid parquet file", "error_type": "format_error", "severity": "error" },
     { "group": "parquet", "regex": "incorrect format of.*for converting to", "error_type": "type_conversion_error", "severity": "error" },
     { "group": "parquet", "regex": "arithmetic overflow", "error_type": "type_conversion_error", "severity": "error" },
-    { "group": "parquet", "regex": "datetime ticks range", "error_type": "type_conversion_error", "severity": "error" }
+    { "group": "parquet", "regex": "datetime ticks range", "error_type": "type_conversion_error", "severity": "error" },
+    { "group": "parquet", "regex": "parquetwritererror", "error_type": "sink_write_failed", "severity": "error" },
+
+    { "group": "custom_codes", "regex": "usererrorfilenotfound", "error_type": "path_not_found", "severity": "critical" },
+    { "group": "custom_codes", "regex": "dfschemamismatch|schemainferenceerror", "error_type": "schema_mismatch", "severity": "error" },
+    { "group": "custom_codes", "regex": "sqloperationfailed", "error_type": "sink_write_failed", "severity": "error" },
+    { "group": "custom_codes", "regex": "dfexpressionerror|stringparsingerror", "error_type": "invalid_expression", "severity": "error" },
+    { "group": "custom_codes", "regex": "dfcastingerror|dateconversionerror", "error_type": "type_conversion_error", "severity": "error" },
+    { "group": "custom_codes", "regex": "arrayindexoutofbounds", "error_type": "invalid_expression", "severity": "error" },
+    { "group": "custom_codes", "regex": "403 permission error|sqlpermissiondenied", "error_type": "path_access_denied", "severity": "critical" },
+    { "group": "custom_codes", "regex": "dfexecutorusererror|sparkexecutorlost|sparkbroadcasterror", "error_type": "resource_exhausted", "severity": "error" },
+    { "group": "custom_codes", "regex": "businessvalidationerror", "error_type": "business_validation_error", "severity": "warning" },
+    { "group": "custom_codes", "regex": "dfparametererror|pathvalidationerror", "error_type": "null_constraint_violation", "severity": "error" },
+    { "group": "custom_codes", "regex": "joincardinalityerror", "error_type": "join_mismatch", "severity": "error" },
+    { "group": "custom_codes", "regex": "parametervalidationerror", "error_type": "format_error", "severity": "error" },
+    { "group": "custom_codes", "regex": "databaseunavailable", "error_type": "connection_failed", "severity": "error" }
   ],
   "summaries": {
     "data_type_mismatch": "Data type mismatch affecting {entities}. Check if columns have consistent types across transformations.",
@@ -156,6 +186,7 @@
     "debug_session_error": "The Data Flow debug session/cluster is unavailable (expired, recycled, or never started). Not a data or lineage issue - restart debug.",
     "integration_runtime_error": "The Integration Runtime itself has a problem (offline, misconfigured, missing a dependency like Java). This is infrastructure, not data or lineage.",
     "component_not_found": "A pipeline/data flow JSON reference points to a dataset, linked service, pipeline, or trigger that doesn't exist. Check the reference, not the data.",
+    "business_validation_error": "A custom business rule flagged the data itself as unexpected (e.g. a row-count or outlier threshold breach), not a technical failure. The pipeline ran correctly - the source data needs review.",
     "unknown_error": "Unknown error type affecting {entities}. Check the full error message and lineage."
   },
   "next_steps": {
@@ -177,6 +208,7 @@
     "transient_db_error": "Next: Retry the activity. If it recurs, check for other jobs holding long locks on the same table, or increase the command/connection timeout.",
     "debug_session_error": "Next: Turn Data Flow debug off and back on to start a fresh cluster. If it recurs during ForEach, use 'Use Activity Runtime' instead of the debug cluster.",
     "integration_runtime_error": "Next: Check the Integration Runtime's status in the ADF portal (online/offline, version), and its host machine's connectivity/dependencies (e.g. Java Runtime for self-hosted IR).",
-    "component_not_found": "Next: Open the pipeline/data flow JSON and verify the referenced dataset/linked service/pipeline/trigger name matches an existing published component."
+    "component_not_found": "Next: Open the pipeline/data flow JSON and verify the referenced dataset/linked service/pipeline/trigger name matches an existing published component.",
+    "business_validation_error": "Next: Investigate the source data for the period in question (e.g. an upstream system change or genuine business event) - this isn't a pipeline bug to fix in code."
   }
 }

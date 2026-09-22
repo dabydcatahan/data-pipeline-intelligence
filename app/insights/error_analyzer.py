@@ -570,6 +570,21 @@ def _generate_checkpoints(
             )
         )
 
+    # Business validation error: a custom data-quality rule fired, not a technical fault
+    elif "business_validation_error" in error_type:
+        checkpoints.append(
+            LineageCheckpoint(
+                checkpoint_type="path",
+                description="Review the source data volume/values for the run in question "
+                "against the business rule's expected range",
+                target_entities=tuple(entities),
+                severity=ErrorSeverity.WARNING,
+                rationale="This is a custom business-rule threshold breach (e.g. an outlier "
+                "or row-count check), not a pipeline bug - the pipeline itself ran "
+                "correctly, so lineage tracing won't explain it.",
+            )
+        )
+
     # Default: general lineage inspection
     if not checkpoints:
         checkpoints.append(
