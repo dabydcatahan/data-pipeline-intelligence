@@ -4,14 +4,12 @@ import pytest
 from app.core.config import AppSettings
 from app.insights import (
     DeterministicInsightProvider,
-    SafeInsightProvider,
     column_request,
     data_flow_request,
     get_provider,
     pipeline_request,
 )
-from app.insights.interface import InsightRequest, InsightResult
-from app.insights.llm import LLMInsightProvider, parse_result
+from app.insights.interface import InsightRequest
 from app.lineage import analyze_impact, build_data_flow_lineage, explain
 from app.parsers.dataflow_parser import DataFlowParser
 from app.parsers.pipeline_parser import PipelineParser
@@ -88,56 +86,10 @@ def test_deterministic_unknown_subject():
     assert "No deterministic template" in result.summary
 
 
-# ---------------------------------------------------------------------- llm
-def test_parse_result_reads_json():
-    payload = {"summary": "s", "observations": ["a", "b"], "risks": [], "recommendations": ["r"]}
-    text = "```json\n" + json.dumps(payload) + "\n```"
-    result = parse_result(text, provider="llm:test")
-    assert result.summary == "s"
-    assert result.observations == ("a", "b")
-    assert result.recommendations == ("r",)
-    assert result.provider == "llm:test"
-
-
-def test_parse_result_falls_back_to_plain_text():
-    result = parse_result("not json at all", provider="llm:test")
-    assert result.summary == "not json at all"
-    assert result.observations == ()
-
-
-def test_llm_provider_raises_without_configuration():
-    provider = LLMInsightProvider(AppSettings(_env_file=None))
-    with pytest.raises(RuntimeError, match="not configured"):
-        provider.generate(InsightRequest(subject="pipeline:x", facts={"kind": "pipeline"}))
-
-
-def test_llm_build_payload_is_sorted_json():
-    provider = LLMInsightProvider(AppSettings(_env_file=None, llm_provider="anthropic"))
-    payload = provider.build_payload(InsightRequest(subject="s", facts={"b": 1, "a": 2}))
-    assert payload.index('"a"') < payload.index('"b"')
-
-
 # ------------------------------------------------------------------ wiring
-def test_get_provider_offline_is_deterministic():
+def test_get_provider_is_deterministic():
     provider = get_provider(AppSettings(_env_file=None))
     assert isinstance(provider, DeterministicInsightProvider)
-
-
-def test_get_provider_with_llm_falls_back_on_error(read_fixture_bytes):
-    settings = AppSettings(
-        _env_file=None,
-        enable_llm_insights=True,
-        llm_provider="anthropic",
-        llm_model="claude-x",
-        llm_api_key="k",
-    )
-    provider = get_provider(settings)
-    assert isinstance(provider, SafeInsightProvider)
-    req = pipeline_request(_pipeline_summary(read_fixture_bytes, "pipeline_copy_direct.json"))
-    result = provider.generate(req)  # anthropic not installed -> RuntimeError -> fallback
-    assert isinstance(result, InsightResult)
-    assert result.provider == "deterministic"
-    assert any("unavailable" in o for o in result.observations)
 
 
 def test_service_insight_methods(read_fixture_bytes, settings):

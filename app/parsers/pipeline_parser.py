@@ -113,7 +113,13 @@ _KNOWN_ACTIVITY_TYPES = frozenset(
 )
 
 
-def _parse_activity(raw: Any, ctx: ParseContext) -> Activity | None:
+def _parse_activity(
+    raw: Any,
+    ctx: ParseContext,
+    *,
+    parent: str | None = None,
+    branch: str | None = None,
+) -> Activity | None:
     if not isinstance(raw, dict):
         ctx.warn("Skipped an activity entry that was not an object.")
         return None
@@ -149,7 +155,102 @@ def _parse_activity(raw: Any, ctx: ParseContext) -> Activity | None:
         column_mappings=column_mappings,
         type_properties=type_props,
         is_recognized=recognized,
+        parent_activity=parent,
+        container_branch=branch,
     )
+
+
+#: For each container activity type, the ``typeProperties`` keys holding a flat
+#: nested-activities array, and the branch label to tag them with (F027).
+_CONTAINER_ACTIVITY_LISTS: dict[str, tuple[tuple[str, str], ...]] = {
+    "ForEach": (("activities", "loop"),),
+    "Until": (("activities", "loop"),),
+    "IfCondition": (("ifTrueActivities", "true"), ("ifFalseActivities", "false")),
+    "If": (("ifTrueActivities", "true"), ("ifFalseActivities", "false")),
+}
+
+
+def _parse_activities(
+    raw_activities: list[Any],
+    ctx: ParseContext,
+    *,
+    parent: str | None = None,
+    branch: str | None = None,
+    seen_names: set[str] | None = None,
+) -> list[Activity]:
+    """Recursively flatten container activities (ForEach/Until/If/Switch) (F027).
+
+    ADF requires activity names to be unique across the whole pipeline (even
+    across nested scopes), so a single flat list - each entry tagged with its
+    ``parent_activity``/``container_branch`` - lets every existing consumer of
+    ``Pipeline.activities`` (lineage, documentation, inventory) see nested Copy
+    and ExecuteDataFlow activities without any special-casing.
+    """
+    seen_names = seen_names if seen_names is not None else set()
+    out: list[Activity] = []
+    for item in raw_activities:
+        activity = _parse_activity(item, ctx, parent=parent, branch=branch)
+        if activity is None:
+            continue
+        if activity.name in seen_names:
+            ctx.warn(
+                f"Activity '{activity.name}' name is used more than once in the pipeline "
+                "(possibly across nested scopes); later occurrence kept, lineage/dependency "
+                "links may be ambiguous."
+            )
+        seen_names.add(activity.name)
+        out.append(activity)
+
+        if not isinstance(item, dict):
+            continue
+        type_props_raw = item.get("typeProperties")
+        type_props = type_props_raw if isinstance(type_props_raw, dict) else {}
+
+        for key, child_branch in _CONTAINER_ACTIVITY_LISTS.get(activity.type, ()):
+            nested = type_props.get(key)
+            if isinstance(nested, list) and nested:
+                out.extend(
+                    _parse_activities(
+                        nested,
+                        ctx,
+                        parent=activity.name,
+                        branch=child_branch,
+                        seen_names=seen_names,
+                    )
+                )
+
+        if activity.type == "Switch":
+            cases = type_props.get("cases")
+            if isinstance(cases, list):
+                for case in cases:
+                    if not isinstance(case, dict):
+                        continue
+                    case_activities = case.get("activities")
+                    if not isinstance(case_activities, list) or not case_activities:
+                        continue
+                    value = case.get("value")
+                    label = f"case:{value}" if isinstance(value, str) else "case"
+                    out.extend(
+                        _parse_activities(
+                            case_activities,
+                            ctx,
+                            parent=activity.name,
+                            branch=label,
+                            seen_names=seen_names,
+                        )
+                    )
+            default_activities = type_props.get("defaultActivities")
+            if isinstance(default_activities, list) and default_activities:
+                out.extend(
+                    _parse_activities(
+                        default_activities,
+                        ctx,
+                        parent=activity.name,
+                        branch="default",
+                        seen_names=seen_names,
+                    )
+                )
+    return out
 
 
 class PipelineParser:
@@ -177,9 +278,7 @@ class PipelineParser:
             raw_activities = []
             ctx.warn("Pipeline has no 'activities' array; treating as empty.")
 
-        activities = tuple(
-            a for a in (_parse_activity(item, ctx) for item in raw_activities) if a is not None
-        )
+        activities = tuple(_parse_activities(raw_activities, ctx))
 
         folder = None
         folder_block = props.get("folder")

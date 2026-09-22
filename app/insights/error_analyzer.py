@@ -1,15 +1,24 @@
-"""Error analysis and lineage inspection recommendations (F025)."""
+"""Error analysis and lineage inspection recommendations (F025).
+
+The regex -> error_type -> severity classification table, and the per-error-type
+summary / next-steps text, are data-driven from ``error_patterns.json`` next to this
+file - not hardcoded here - so a new error pattern can be added by editing that file,
+with no Python change or redeploy. See its ``_readme`` field for the schema and
+ordering rules. Checkpoint generation (:func:`_generate_checkpoints`) stays in Python
+since it's branching logic, not flat data; an error_type with no matching branch there
+still gets a safe generic checkpoint.
+"""
 
 from __future__ import annotations
 
+import json
 import re
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 from app.core.logging import get_logger
 from app.lineage.graph import ColumnLineageGraph
 from app.lineage.traversal import explain
 from app.models.error_analysis import (
-    AISuggestion,
     EntityReference,
     ErrorAnalysis,
     ErrorSeverity,
@@ -17,69 +26,39 @@ from app.models.error_analysis import (
 )
 from app.models.lineage import ColumnJourney
 
-if TYPE_CHECKING:
-    from app.insights.gpt4all_provider import analyze_error_with_ai  # For type hints only
-
 logger = get_logger(__name__)
 
-# Common ADF error patterns and what lineage to check
-# NOTE: Order matters! More specific patterns should be checked before generic ones.
-_ERROR_PATTERNS = {
-    # Common ADF runtime errors (F025 additions) - checked first for specificity
-    r"staging blob not accessible": ("staging_blob_not_accessible", ErrorSeverity.CRITICAL),
-    r"column length validation error": ("column_length_exceeded", ErrorSeverity.ERROR),
-    r"lookup activity failed": ("lookup_failed", ErrorSeverity.ERROR),
-    r"(no matching records found).*lookup": ("lookup_failed", ErrorSeverity.ERROR),
-    r"(spark operation|spark.*failed)": ("spark_operation_failed", ErrorSeverity.ERROR),
-    r"a value error was found.*field": ("value_error", ErrorSeverity.ERROR),
-    # Data type mismatches
-    r"(type|datatype|data type).*mismatch": ("data_type_mismatch", ErrorSeverity.ERROR),
-    r"(cannot convert|invalid cast|type conversion)": (
-        "type_conversion_error",
-        ErrorSeverity.ERROR,
-    ),
-    r"(varchar|string|integer|numeric|decimal).*incompatible": (
-        "incompatible_type",
-        ErrorSeverity.ERROR,
-    ),
-    # Missing columns
-    r"(column|field).*not found": ("missing_column", ErrorSeverity.ERROR),
-    r"(does not contain|no such column)": ("missing_column", ErrorSeverity.ERROR),
-    r"unknown column": ("missing_column", ErrorSeverity.ERROR),
-    # Null/empty issues
-    r"(null|empty|blank).*not allowed": ("null_constraint_violation", ErrorSeverity.ERROR),
-    r"(null|undefined|missing).*value": ("null_value_encountered", ErrorSeverity.WARNING),
-    # Row/data issues
-    r"(row|record).*rejected": ("row_rejected", ErrorSeverity.ERROR),
-    r"(duplicate|unique|primary key)": ("duplicate_key_violation", ErrorSeverity.ERROR),
-    r"(no matching record|join).*failed": ("join_mismatch", ErrorSeverity.ERROR),
-    # Transformation/expression errors
-    r"(expression|formula).*invalid": ("invalid_expression", ErrorSeverity.ERROR),
-    r"(cannot execute|operator.*failed)": ("transformation_failed", ErrorSeverity.ERROR),
-    r"divide by zero": ("division_by_zero", ErrorSeverity.ERROR),
-    # Encoding/format issues
-    r"(encoding|charset|unicode).*invalid": ("encoding_error", ErrorSeverity.ERROR),
-    r"(invalid format|malformed)": ("format_error", ErrorSeverity.ERROR),
-    # Dataset/connection issues
-    r"(dataset|table|view).*not found": ("dataset_not_found", ErrorSeverity.ERROR),
-    r"(connection|link).*failed": ("connection_failed", ErrorSeverity.ERROR),
-    # File/path/storage issues (generic patterns checked after specific ones)
-    r"(path|file|blob|object).*not (found|exist)": ("path_not_found", ErrorSeverity.CRITICAL),
-    r"404.*head": ("path_not_found", ErrorSeverity.CRITICAL),
-    r"specified path does not exist": ("path_not_found", ErrorSeverity.CRITICAL),
-    r"(access denied|permission denied|unauthorized).*path": (
-        "path_access_denied",
-        ErrorSeverity.CRITICAL,
-    ),
-    r"(sink|dataset).*operation failed": ("sink_write_failed", ErrorSeverity.CRITICAL),
-}
+_PATTERNS_FILE = Path(__file__).with_name("error_patterns.json")
 
-# Entity name patterns (try to extract columns, datasets, etc.)
+
+def _load_patterns_file() -> tuple[
+    tuple[tuple[re.Pattern[str], str, ErrorSeverity], ...],
+    dict[str, str],
+    dict[str, str],
+]:
+    """Load and compile the classification table from ``error_patterns.json``.
+
+    Order is preserved from the JSON array (first regex match wins, see
+    :func:`_classify_error`), matching the file's own specific-before-generic rule.
+    """
+    data = json.loads(_PATTERNS_FILE.read_text(encoding="utf-8"))
+    patterns = tuple(
+        (re.compile(p["regex"], re.IGNORECASE), p["error_type"], ErrorSeverity(p["severity"]))
+        for p in data["patterns"]
+    )
+    return patterns, dict(data["summaries"]), dict(data["next_steps"])
+
+
+_PATTERNS, _SUMMARY_TEMPLATES, _NEXT_STEPS = _load_patterns_file()
+
+# Entity name patterns (try to extract columns, datasets, etc.). Quotes are required
+# around the captured name: without them, common English words following "column"/
+# "table" (e.g. "column does not allow nulls") would be misdetected as entity names.
 _ENTITY_PATTERNS = [
-    (r"(?:column|field)\s+['\"]?([a-zA-Z_][a-zA-Z0-9_]*)['\"]?", "column"),
-    (r"(?:dataset|table|view)\s+['\"]?([a-zA-Z_][a-zA-Z0-9_\.]*)['\"]?", "dataset"),
-    (r"(?:stream|transformation)\s+['\"]?([a-zA-Z_][a-zA-Z0-9_]*)['\"]?", "stream"),
-    (r"['\"]([a-zA-Z_][a-zA-Z0-9_]*)['\"].*(?:column|field)", "column"),
+    (r"(?:column|field)\s+['\"]([a-zA-Z_][a-zA-Z0-9_]*)['\"]", "column"),
+    (r"(?:dataset|table|view)\s+['\"]([a-zA-Z_][a-zA-Z0-9_.]*)['\"]", "dataset"),
+    (r"(?:stream|transformation)\s+['\"]([a-zA-Z_][a-zA-Z0-9_]*)['\"]", "stream"),
+    (r"constraint\s+['\"]([a-zA-Z_][a-zA-Z0-9_]*)['\"]", "constraint"),
 ]
 
 
@@ -100,10 +79,8 @@ def _extract_entities(error_text: str) -> list[EntityReference]:
 
 def _classify_error(error_text: str) -> tuple[str, ErrorSeverity]:
     """Classify the error type based on patterns in the error message."""
-    error_lower = error_text.lower()
-
-    for pattern, (error_type, severity) in _ERROR_PATTERNS.items():
-        if re.search(pattern, error_lower, re.IGNORECASE):
+    for pattern, error_type, severity in _PATTERNS:
+        if pattern.search(error_text):
             return error_type, severity
 
     return "unknown_error", ErrorSeverity.WARNING
@@ -201,6 +178,30 @@ def _generate_checkpoints(
                 target_entities=tuple(entities),
                 severity=ErrorSeverity.ERROR,
                 rationale="Verify join keys are populated and the correct type.",
+            )
+        )
+
+    # Foreign key violation: a referenced parent row is missing at the sink
+    elif "foreign_key" in error_type:
+        checkpoints.append(
+            LineageCheckpoint(
+                checkpoint_type="column",
+                description="Verify the referenced parent table already contains the key value",
+                target_entities=tuple(entities),
+                severity=ErrorSeverity.ERROR,
+                rationale="A foreign key violation means the sink table's parent/reference "
+                "table doesn't yet have a matching row for this key.",
+            )
+        )
+        checkpoints.append(
+            LineageCheckpoint(
+                checkpoint_type="path",
+                description="Check pipeline activity order: parent tables must load before "
+                "child tables that reference them",
+                target_entities=tuple(entities),
+                severity=ErrorSeverity.ERROR,
+                rationale="If parent and child loads run out of order (or in parallel without "
+                "a dependency), the child insert can race ahead of the parent.",
             )
         )
 
@@ -459,6 +460,116 @@ def _generate_checkpoints(
             )
         )
 
+    # Throttling: concurrent runs hitting an integration runtime / service limit
+    elif "throttling" in error_type:
+        checkpoints.append(
+            LineageCheckpoint(
+                checkpoint_type="path",
+                description="Review how many pipelines/data flows run concurrently on the "
+                "same integration runtime",
+                target_entities=tuple(entities),
+                severity=ErrorSeverity.WARNING,
+                rationale="Throttling isn't a data or lineage bug - it means too many "
+                "concurrent executions are competing for the same compute.",
+            )
+        )
+
+    # Resource exhaustion: cluster ran out of memory/disk during execution
+    elif "resource_exhausted" in error_type:
+        checkpoints.append(
+            LineageCheckpoint(
+                checkpoint_type="transformation",
+                description="Review transformations most likely to skew partition size "
+                "(joins, aggregates, broadcasts, wide unions)",
+                target_entities=tuple(entities),
+                severity=ErrorSeverity.ERROR,
+                rationale="Out-of-memory errors are usually caused by data skew or an "
+                "undersized cluster, not by the lineage/mapping itself.",
+            )
+        )
+
+    # Limit exceeded: activity/loop hit a hard ADF service limit
+    elif "limit_exceeded" in error_type:
+        checkpoints.append(
+            LineageCheckpoint(
+                checkpoint_type="path",
+                description="Check the activity's input size against ADF's documented limits "
+                "(e.g. ForEach item count, parameter/array size)",
+                target_entities=tuple(entities),
+                severity=ErrorSeverity.ERROR,
+                rationale="This is an ADF service limit (documented maximum), not a data "
+                "quality or lineage issue - it needs a pipeline redesign (e.g. batching).",
+            )
+        )
+
+    # Schema mismatch: source/sink shapes don't line up (column count, names, order)
+    elif "schema_mismatch" in error_type:
+        checkpoints.append(
+            LineageCheckpoint(
+                checkpoint_type="column",
+                description="Compare source and sink schemas: column count, names, order and types",
+                target_entities=tuple(entities),
+                severity=ErrorSeverity.ERROR,
+                rationale="Schema mismatches are structural, not single-column - the whole "
+                "shape of the source and sink need to line up.",
+            )
+        )
+
+    # Transient DB error: deadlock/timeout/dropped connection - retry, not a data bug
+    elif "transient_db_error" in error_type:
+        checkpoints.append(
+            LineageCheckpoint(
+                checkpoint_type="path",
+                description="Retry the activity; if it recurs, check for other jobs holding "
+                "long locks on the same table",
+                target_entities=tuple(entities),
+                severity=ErrorSeverity.WARNING,
+                rationale="Deadlocks, timeouts and dropped connections are usually transient "
+                "database/network conditions, not lineage or mapping problems.",
+            )
+        )
+
+    # Debug session error: the Data Flow debug cluster is unavailable
+    elif "debug_session_error" in error_type:
+        checkpoints.append(
+            LineageCheckpoint(
+                checkpoint_type="path",
+                description="Restart the Data Flow debug session",
+                target_entities=tuple(entities),
+                severity=ErrorSeverity.WARNING,
+                rationale="Debug clusters expire (default 60 min idle) or get recycled under "
+                "parallel ForEach load - this is unrelated to lineage or mapping.",
+            )
+        )
+
+    # Integration Runtime error: the IR itself is the problem, not the data
+    elif "integration_runtime_error" in error_type:
+        checkpoints.append(
+            LineageCheckpoint(
+                checkpoint_type="path",
+                description="Check the Integration Runtime's status, version and host "
+                "connectivity/dependencies",
+                target_entities=tuple(entities),
+                severity=ErrorSeverity.CRITICAL,
+                rationale="Offline nodes, missing Java, or a stale self-hosted IR version are "
+                "infrastructure problems - lineage tracing won't help here.",
+            )
+        )
+
+    # Component not found: a broken JSON reference, not a runtime data issue
+    elif "component_not_found" in error_type:
+        checkpoints.append(
+            LineageCheckpoint(
+                checkpoint_type="path",
+                description="Verify the referenced dataset/linked service/pipeline/trigger "
+                "name exists and is published",
+                target_entities=tuple(entities),
+                severity=ErrorSeverity.CRITICAL,
+                rationale="This is a broken reference in the pipeline/data flow JSON itself "
+                "(often from an incomplete Git merge), not a data or lineage problem.",
+            )
+        )
+
     # Default: general lineage inspection
     if not checkpoints:
         checkpoints.append(
@@ -477,7 +588,6 @@ def _generate_checkpoints(
 def analyze_error(
     error_text: str,
     graph: ColumnLineageGraph | None = None,
-    use_ai: bool = False,
 ) -> ErrorAnalysis:
     """
     Analyze an ADF error message and generate lineage inspection recommendations.
@@ -485,11 +595,9 @@ def analyze_error(
     Args:
         error_text: The ADF error message or output
         graph: Optional ColumnLineageGraph to cross-reference entities
-        use_ai: If True, attempt to enhance analysis with AI suggestions (optional).
-                Requires GPT4All to be installed and model cached.
 
     Returns:
-        ErrorAnalysis with detected entities, checkpoints, and optional AI suggestions
+        ErrorAnalysis with detected entities and checkpoints
     """
     if not error_text or not error_text.strip():
         return ErrorAnalysis(
@@ -529,16 +637,6 @@ def analyze_error(
     summary = _summarize_error(error_type, entities)
     next_steps = _suggest_next_steps(error_type)
 
-    # Try to get AI suggestions if requested
-    ai_suggestions: AISuggestion | None = None
-    if use_ai:
-        ai_suggestions = _get_ai_suggestions(
-            error_text,
-            error_type,
-            tuple(entities),
-            _build_lineage_context(suggested_journeys),
-        )
-
     return ErrorAnalysis(
         error_text=error_text,
         error_summary=summary,
@@ -547,7 +645,6 @@ def analyze_error(
         severity=severity,
         lineage_checkpoints=tuple(checkpoints),
         suggested_lineage=suggested_journeys,
-        ai_suggestions=ai_suggestions,
         additional_notes=next_steps,
     )
 
@@ -597,155 +694,14 @@ def _summarize_error(error_type: str, entities: list[EntityReference]) -> str:
     if len(entities) > 3:
         entity_str += f", and {len(entities) - 3} more"
 
-    summaries = {
-        "data_type_mismatch": f"Data type mismatch affecting {entity_str}. "
-        "Check if columns have consistent types across transformations.",
-        "type_conversion_error": f"Failed to convert type for {entity_str}. "
-        "Ensure source data matches expected type.",
-        "incompatible_type": f"Type incompatibility: {entity_str} may be wrong type. "
-        "Verify type casting in transformations.",
-        "missing_column": f"Column(s) {entity_str} not found. "
-        "Check if they exist in the source or were dropped by a transformation.",
-        "null_constraint_violation": f"NULL value not allowed for {entity_str}. "
-        "Verify source data is not null or add handling.",
-        "null_value_encountered": f"Unexpected NULL in {entity_str}. "
-        "Check upstream data quality and NULL handling.",
-        "row_rejected": f"Row(s) rejected involving {entity_str}. "
-        "Review constraints and validation rules.",
-        "duplicate_key_violation": f"Duplicate key in {entity_str}. "
-        "Check aggregation and grouping logic.",
-        "join_mismatch": f"Join failed for {entity_str}. Verify join keys and key types match.",
-        "invalid_expression": f"Expression error in {entity_str}. "
-        "Review the transformation formula or function call.",
-        "transformation_failed": f"Transformation failed in {entity_str}. "
-        "Check operator configuration and input data.",
-        "division_by_zero": f"Division by zero in {entity_str}. "
-        "Add NULL check or condition to avoid zero divisor.",
-        "encoding_error": f"Encoding issue in {entity_str}. "
-        "Verify character encoding is compatible.",
-        "format_error": f"Format mismatch in {entity_str}. "
-        "Check data format (date, number, etc.) compatibility.",
-        "dataset_not_found": f"Dataset {entity_str} not found. "
-        "Verify dataset exists and is accessible.",
-        "connection_failed": f"Connection issue for {entity_str}. "
-        "Check credentials and dataset configuration.",
-        "path_not_found": f"File or path {entity_str} not found (404 error). "
-        "The sink destination path may not exist or is unreachable.",
-        "path_access_denied": f"Access denied for path {entity_str}. "
-        "Check credentials and permissions for the storage account.",
-        "sink_write_failed": f"Failed to write to sink {entity_str}. "
-        "Check data format, schema compatibility, and path accessibility.",
-        "unknown_error": f"Unknown error type affecting {entity_str}. "
-        "Check the full error message and lineage.",
-    }
-
-    return summaries.get(error_type, f"Error affecting {entity_str}. Review lineage and data flow.")
+    template = _SUMMARY_TEMPLATES.get(
+        error_type, "Error affecting {entities}. Review lineage and data flow."
+    )
+    return template.format(entities=entity_str)
 
 
 def _suggest_next_steps(error_type: str) -> str:
     """Suggest follow-up steps for resolving the error."""
-    suggestions = {
-        "data_type_mismatch": "Next: Check source column types vs. sink requirements. "
-        "Consider adding explicit type casting in a derive transformation.",
-        "missing_column": "Next: Verify the column name in all transformations. "
-        "Use the Column Lineage page to trace its origin.",
-        "null_constraint_violation": "Next: Either filter NULLs upstream or handle them "
-        "in a derive transformation (e.g., coalesce).",
-        "duplicate_key_violation": "Next: Ensure proper GROUP BY in aggregate operations. "
-        "Verify no duplicate records in source.",
-        "join_mismatch": "Next: Check join key types and values. "
-        "Consider adding a filter to remove NULLs before the join.",
-        "invalid_expression": "Next: Review the expression syntax. "
-        "Use simple expressions to isolate the issue.",
-        "type_conversion_error": "Next: Check source data format. "
-        "Add a cast/conversion step if needed.",
-        "path_not_found": "Next: Verify the sink dataset path exists in storage. "
-        "Check if ADLS/blob container and folder structure are correct. "
-        "Ensure partition folders are created if using dynamic paths.",
-        "path_access_denied": "Next: Review storage account credentials and access permissions. "
-        "Verify the linked service/connection string is valid and the user has write "
-        "permissions.",
-        "sink_write_failed": "Next: Start with the source data validation. Trace through each "
-        "transformation to verify data types and schema match sink requirements.",
-    }
-
-    return suggestions.get(
+    return _NEXT_STEPS.get(
         error_type, "Next: Use the lineage visualization to trace the error path."
     )
-
-
-def _build_lineage_context(
-    suggested_journeys: tuple[ColumnJourney, ...],
-) -> dict[str, object]:
-    """Build lineage context from suggested column journeys for AI analysis.
-
-    Args:
-        suggested_journeys: Tuple of ColumnJourney objects from lineage analysis
-
-    Returns:
-        Dictionary with lineage metadata for AI prompt
-    """
-    if not suggested_journeys:
-        return {}
-
-    context: dict[str, object] = {
-        "journey_count": len(suggested_journeys),
-        "journeys_summary": [],
-    }
-
-    for journey in suggested_journeys[:3]:  # Limit to first 3 journeys for context size
-        journey_info = {
-            "column": journey.column_id,
-            "origin_stream": journey.origin_stream,
-            "final_stream": journey.final_stream,
-            "upstream_steps": len(journey.upstream_steps),
-            "transformations_count": len(journey.transformations),
-        }
-        context["journeys_summary"].append(journey_info)  # type: ignore
-
-    return context
-
-
-def _get_ai_suggestions(
-    error_text: str,
-    error_type: str,
-    entities: tuple[EntityReference, ...],
-    lineage_context: dict[str, object],
-) -> AISuggestion | None:
-    """Get AI-powered suggestions for error analysis.
-
-    This function attempts to call the GPT4All provider for enhanced analysis.
-    If the model is not available or analysis fails, returns None with a warning.
-
-    Args:
-        error_text: Original error message
-        error_type: Detected error type from classification
-        entities: Extracted entity references
-        lineage_context: Lineage metadata from column journeys
-
-    Returns:
-        AISuggestion if successful, None if AI is unavailable or fails
-    """
-    try:
-        # Import at function level so tests can patch it
-        from app.insights.gpt4all_provider import analyze_error_with_ai
-        from app.core.exceptions import AIAnalysisError
-
-        logger.debug(f"Attempting AI analysis for error type: {error_type}")
-        ai_suggestions = analyze_error_with_ai(
-            error_text=error_text,
-            error_type=error_type,
-            entities=entities,
-            lineage_context=lineage_context if lineage_context else None,
-        )
-        logger.debug(
-            f"AI analysis successful, confidence: {ai_suggestions.confidence:.2f}"
-        )
-        return ai_suggestions
-
-    except ImportError:
-        logger.debug("GPT4All not installed; AI analysis skipped")
-        return None
-    except Exception as e:
-        logger.warning(f"AI analysis failed, using deterministic only: {e}")
-        return None

@@ -173,11 +173,25 @@ Error Analyzer (new page)
 │  ├─ Recommended checkpoints
 │  │  ├─ Description
 │  │  ├─ Rationale
-│  │  ├─ Affected entities
-│  │  └─ [Optional] Interactive lineage graph
+│  │  └─ Affected entities
+│  ├─ Column Lineage (real, not generic - only when a detected column
+│  │  actually matches a node in an uploaded data flow/pipeline)
+│  │  ├─ Origin(s) / sink columns reached
+│  │  ├─ Plain-language narrative (ColumnJourney.narrative())
+│  │  └─ Interactive lineage graph, focused on that column
 │  ├─ Next steps advice
+│  ├─ Unrecognized-pattern flag (opt-in, see below)
 │  └─ Original error (expandable)
 ```
+
+The "Column Lineage" section is driven by `ErrorAnalysis.suggested_lineage`
+(`app/insights/error_analyzer.py::_generate_lineage_suggestions`), which the service
+layer already computed by matching detected entities against the combined lineage
+graph of everything currently uploaded (`AnalysisService.analyze_error`) - the UI
+just needed to actually render it. This fixed a real gap: the previous UI only drew a
+lineage graph inside a checkpoint of `checkpoint_type == "column"`, which
+`missing_column` (the single most common error type) never produces, so real column
+lineage was silently never shown for the most common case.
 
 ## Error Type to Checkpoint Mapping
 
@@ -190,40 +204,84 @@ Error Analyzer (new page)
 | null_value_encountered | Upstream data quality | WARNING |
 | duplicate_key_violation | Aggregate grouping, source | CRITICAL |
 | join_mismatch | Join conditions, key types | CRITICAL |
+| foreign_key_violation | Parent table, activity order | ERROR |
 | invalid_expression | Transformation, input columns | ERROR |
 | division_by_zero | Transformation expression | ERROR |
+| throttling_error | Concurrency review | WARNING |
+| resource_exhausted | Skew-prone transformations | ERROR |
+| limit_exceeded | Activity input size vs. ADF limits | ERROR |
+| schema_mismatch | Source/sink schema comparison | ERROR |
+| transient_db_error | Retry guidance, lock contention | WARNING |
+| debug_session_error | Restart debug session | WARNING |
+| integration_runtime_error | IR status/version/connectivity | CRITICAL |
+| component_not_found | Verify JSON reference (dataset/linked service/pipeline/trigger) | CRITICAL |
 | unknown_error | Full lineage path | WARNING |
+
+The last five (`schema_mismatch` through `component_not_found`) are deliberately
+**not** lineage-graph checkpoints — their root cause is infrastructure, a broken
+reference, or a transient database condition, not the data itself, so their
+checkpoint says so explicitly rather than pointing at column lineage that isn't
+the actual problem.
+
+> Added in the real-error hardening pass (see PROJECT_PLAN.md session log): `column
+> mapping cannot be found`, `invalid column name`, SQL Server truncation/NULL/FK wording,
+> `DF-Executor-*` data-flow error text, throttling/OOM/limit patterns, and 4 new error
+> types (`foreign_key_violation`, `throttling_error`, `resource_exhausted`,
+> `limit_exceeded`) sourced from Microsoft's official troubleshooting docs and real
+> Copy activity / SQL sink error text reported on Microsoft Q&A / Stack Overflow.
+
+## Unrecognized-Error Capture (opt-in)
+
+When `analyze_error()` returns `unknown_error`, the UI (`page_error_analyzer`) shows
+a "🚩 Flag this error as unrecognized" button — but only if
+`AppSettings.error_misses_path` is configured (env `ADFPI_ERROR_MISSES_PATH`); it's
+`None`/off by default and the button simply doesn't render. Clicking it calls
+`AnalysisService.flag_unrecognized_error()`, which redacts the text
+(`app/insights/error_feedback.redact_text()` — best-effort regex redaction of
+secret-shaped substrings, not a guarantee) and appends one JSON line (`{flagged_at,
+error_text}`) to the configured file via `record_unrecognized_error()`. A maintainer
+periodically reviews that file and adds patterns to `error_patterns.json` (see
+"Adding a New Error Pattern" below). This is the app's one deliberate, opt-in
+exception to "nothing is ever persisted" (see DEC-012 in `PROJECT_PLAN.md`) — chosen
+over automatic logging specifically so nothing is written without the user's
+explicit action.
 
 ## Future Enhancements
 
 Potential improvements for future releases:
 
-1. **ML-based error classification** (LLM integration for better pattern matching)
-2. **Error history tracking** (show similar errors and how they were resolved)
-3. **Automated fixes** (suggest code changes to resolve common errors)
-4. **Integration with Azure Monitor** (fetch real runtime errors directly)
-5. **Error severity scoring** (impact assessment on downstream systems)
-6. **Custom error patterns** (allow users to define domain-specific error patterns)
+1. **Error history tracking** (show similar errors and how they were resolved)
+2. **Automated fixes** (suggest code changes to resolve common errors)
+3. **Integration with Azure Monitor** (fetch real runtime errors directly)
+4. **Error severity scoring** (impact assessment on downstream systems)
+5. **Miss-frequency dashboard** (rank the flagged-misses file by frequency so a
+   maintainer knows which unrecognized patterns to prioritize)
+
+Note: LLM-based classification was considered and explicitly rejected (see
+PROJECT_PLAN.md) - the deterministic regex classifier is the only classification path.
 
 ## Notes for Developers
 
 ### Adding a New Error Pattern
 
-1. Add regex pattern to `_ERROR_PATTERNS` in `error_analyzer.py`:
-   ```python
-   _ERROR_PATTERNS = {
-       r"your_pattern_here": ("error_type", ErrorSeverity.ERROR),
-       # ...
-   }
-   ```
+The classification table is data, not code — see `app/insights/error_patterns.json`
+(its own `_readme` field has the full schema/ordering rules).
 
-2. Add checkpoint generation logic in `_generate_checkpoints()`:
-   ```python
-   elif "error_type" in error_type:
-       checkpoints.append(LineageCheckpoint(...))
+1. Add an entry to `patterns` in `error_patterns.json` (order matters — more
+   specific patterns must come before generic ones, since the first match wins):
+   ```json
+   { "group": "your_group", "regex": "your_pattern_here", "error_type": "error_type", "severity": "error" }
    ```
-
-3. Add test case in `tests/unit/test_error_analyzer.py`
+   Reusing an existing `error_type` (e.g. `missing_column`) gets you its existing
+   checkpoints/summary/next-steps for free — no Python change needed. A brand new
+   `error_type` still gets a safe generic checkpoint (see step 2) even before
+   anyone writes tailored logic for it.
+2. Add a `summaries` / `next_steps` entry for a new `error_type` (also in the
+   JSON; `{entities}` is replaced with the detected entity names).
+3. Optional: add tailored checkpoint generation logic for a new `error_type` in
+   `_generate_checkpoints()` (`error_analyzer.py`) — this part stays Python since
+   it's branching logic, not flat data.
+4. Add a test case in `tests/unit/test_error_analyzer.py`.
 
 ### Debugging an Error Analysis
 
@@ -243,9 +301,12 @@ print(result.lineage_checkpoints)
 
 - **New models:** `app/models/error_analysis.py`
 - **Analyzer logic:** `app/insights/error_analyzer.py`
+- **Pattern data:** `app/insights/error_patterns.json`
+- **Unrecognized-error capture:** `app/insights/error_feedback.py`
 - **UI page:** `app/ui/app.py::page_error_analyzer()`
-- **Tests:** `tests/unit/test_error_analyzer.py`
-- **Integration:** `app/services/analysis_service.py::analyze_error()`
+- **Tests:** `tests/unit/test_error_analyzer.py`, `tests/unit/test_error_feedback.py`
+- **Integration:** `app/services/analysis_service.py::analyze_error() /
+  flag_unrecognized_error()`
 
 ---
 

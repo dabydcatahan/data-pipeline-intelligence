@@ -53,14 +53,13 @@ User → Streamlit UI → Upload/Validation → ADF JSON Parser
 | F015 | Lineage visualization (Graphviz DOT; optional PyVis) | ✅ done |
 | F016 / F022–F024 | Dashboard, Pipeline / Data Flow explorers, Column Lineage & Impact UI + search | ✅ done |
 | F013–F014 / F018 | Documentation generation + Markdown/HTML export | ✅ done |
-| F017 | AI insight providers (deterministic default, optional LLM) | ✅ done |
+| F017 | AI insight providers (deterministic only) | ✅ done |
 | F008 | Pipeline column lineage + cross-artifact stitching | ✅ done |
 | F005–F007 | Source / sink / transformation discovery (Inventory page) | ✅ done |
 
 **The full feature catalogue (F001–F024) is implemented.** Remaining work is
 release hardening (Docker build verification, security review, a 5 MiB
 performance benchmark).
-| F017 | AI insights (deterministic + optional LLM providers) | ⬜ planned |
 | F008 | Pipeline / Copy-activity column lineage + cross-artifact stitching | ⬜ planned |
 
 ## Compatibility matrix
@@ -72,18 +71,20 @@ performance benchmark).
 | Activities (`dependsOn`, inputs/outputs) | Yes | Execution order via topological sort; cycles reported |
 | Unknown activity types | Yes | Kept and flagged, never fatal |
 | ExecuteDataFlow references | Yes | Data flow reference name captured |
-| Control-flow inner activities (`ForEach`/`If`/`Switch`) | Partial | Container recorded; nested activities not yet expanded |
+| Control-flow inner activities (`ForEach`/`Until`/`If`/`Switch`) | Yes | Nested activities (loop body, true/false branches, cases, default) recursively expanded into `Pipeline.activities`, tagged with `parent_activity`/`container_branch`; visible to lineage, documentation and inventory like any other activity |
 | Mapping Data Flow JSON | Yes | Data Flow Script parsed into sources, sinks, transformations, stream graph |
 | Data flow `source` / `sink` | Yes | Dataset refs + parsed source schema (`output(...)`) |
 | Data flow `derive` / `select` | Yes | Target columns + raw expression; `select` splits retained / renamed / derived |
 | Data flow `aggregate` | Yes | `groupBy` columns + aggregation target columns |
-| Data flow `join` / `filter` / `union` | Partial | Input streams + raw argument text captured; keys/predicates not yet decomposed |
-| Data flow `lookup` / `pivot` / `window` / `flatten` / … | Partial | Recognized and kept; arguments not yet decomposed |
+| Data flow `join` / `lookup` / `filter` / `union` / `flatten` | Yes | Keys/predicates decomposed into JOIN_KEY / LOOKUP / FILTER / UNION edges from the parsed condition/argument expression |
+| Data flow `window` | Yes | `over()`/`asc()`/`desc()` partition+sort columns and `windowColumns()` expressions decomposed into WINDOW edges |
+| Data flow `pivot` | Partial | `groupBy()` columns decomposed (DIRECT); aggregate columns decomposed (AGGREGATE) with output names approximated from a literal `pivotBy()` value list — real column names are data-dependent |
+| Data flow `unpivot` / `parse` / `surrogateKey` / … | Partial | Recognized and kept; arguments not yet decomposed (passthrough approximation) |
 | Unknown data flow operators | Yes | Flagged as a warning, kept, never fatal |
 | Expressions — data-flow dialect | Yes | Referenced columns resolved (`concat`, `iif`, `isNull`, `toString`, `substring`, `sum`, `byName`, `stream@col`, `$param`); unsupported → "Unable to determine automatically" |
 | Expressions — pipeline dialect (`@concat`, `pipeline().parameters.x`) | Partial | Function names + parameter/variable references only |
 | Higher-order expressions (`reduce`, `mapIndex`, …) | Partial | Flagged; column dependencies may be incomplete |
-| Column-level lineage graph (Mapping Data Flow) | Yes | source→sink column graph; direct / rename / derived / join-key / aggregate / filter / union / split relationships |
+| Column-level lineage graph (Mapping Data Flow) | Yes | source→sink column graph; direct / rename / derived / join-key / lookup / aggregate / filter / union / split / window relationships |
 | Upstream / downstream traversal + "explain" narrative | Yes | origin, journey steps, downstream columns, sinks reached |
 | Column-level lineage (Pipeline / Copy activity) | Yes | Copy activities with an explicit `TabularTranslator` map; `dataset::column` nodes |
 | Cross-artifact stitching | Yes | Pipeline Copy columns ↔ data-flow source/sink columns joined by shared dataset name; one combined graph, searchable in the UI ("All artifacts" scope) |
@@ -93,8 +94,8 @@ performance benchmark).
 | Inventory / discovery | Yes | Cross-artifact tables: datasets (reader/writer artifacts + column counts), sources, sinks, transformations |
 | Linked-service names / dataset formats | No | Those live in Dataset / LinkedService JSON, which this tool classifies as "unknown" (and connection details must never be surfaced) |
 | Documentation generation | Markdown + HTML | Deterministic; pipeline & data-flow docs incl. per-transformation column mapping + end-to-end column lineage; `.md` / standalone `.html` download in the UI (dependency-free, XSS-safe converter) |
-| AI insights | Yes | Offline `DeterministicInsightProvider` (default) turns structural facts into summary / observations / risks / recommendations; optional `LLMInsightProvider` (`pip install '.[llm]'`, `ADFPI_*` config) receives **only** sanitized metadata and falls back to deterministic on any error. AI never determines lineage |
-| Lineage through `window` / `pivot` / `flatten` / unknown ops | Approx. | Passthrough approximation + warning |
+| AI insights | Yes | Offline `DeterministicInsightProvider` (only provider) turns structural facts into summary / observations / risks / recommendations. Fully offline, no network calls, no LLM. AI never determines lineage |
+| Lineage through `unpivot` / unrecognized operators | Approx. | Passthrough approximation + warning |
 | Secrets / connection strings | Redacted | Secret-bearing keys dropped before they reach any model |
 
 ## Installation
@@ -158,8 +159,13 @@ The container runs `streamlit run app/ui/app.py` on port 8501.
 - Uploaded JSON content and column values are **never logged**.
 - Secret-bearing keys (connection strings, keys, passwords, tokens, …) are
   dropped during parsing and can never reach the model, UI, export or AI layer.
-- No outbound network calls unless an LLM insight provider is explicitly
-  configured and enabled; even then it receives only sanitized metadata.
+- No outbound network calls, ever. Insights are generated entirely offline by
+  the deterministic provider.
+- One narrow, **opt-in** exception: if `ADFPI_ERROR_MISSES_PATH` is set (unset
+  by default), a user can explicitly click "Flag this error" in the Error
+  Analyzer to save an unrecognized error message to that file for later review
+  (best-effort secret redaction applied first — see DEC-012 in
+  `PROJECT_PLAN.md`). With the setting unset, nothing changes.
 
 ## Limitations
 
@@ -184,7 +190,7 @@ hardening.
 5. ~~Lineage visualization (Graphviz DOT + optional PyVis)~~ ✅
 6. ~~Data Flow Explorer + Column Lineage / Impact UI + column search~~ ✅
 7. ~~Documentation engine + Markdown/HTML export~~ ✅
-8. ~~AI insight providers (deterministic default, optional LLM)~~ ✅
+8. ~~AI insight providers (deterministic only)~~ ✅
 9. ~~Pipeline / Copy-activity column lineage + cross-artifact stitching~~ ✅
 10. ~~Source / sink / transformation discovery & inventory views~~ ✅
 11. Release hardening: Docker build check, security review, 5 MiB perf benchmark *(next)*
@@ -199,7 +205,7 @@ app/
   lineage/       column lineage graph + traversal + impact + pipeline lineage + cross-artifact stitch
   visualization/ Graphviz DOT + optional PyVis rendering of the lineage graph
   documentation/ deterministic Markdown + dependency-free HTML export
-  insights/      AI enhancement layer: sanitize + deterministic/LLM/safe providers
+  insights/      AI enhancement layer: sanitize + deterministic provider
   services/      orchestration the UI calls
   ui/            Streamlit app
 tests/

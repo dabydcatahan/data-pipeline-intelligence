@@ -36,25 +36,6 @@ class LineageCheckpoint(ModelBase):
     rationale: str = ""  # Why this checkpoint matters for the error
 
 
-class AISuggestion(ModelBase):
-    """AI-powered suggestions for fixing an ADF error."""
-
-    root_cause: str
-    """One sentence explaining why the error occurred."""
-
-    diagnosis: str
-    """2-3 sentences describing what is broken in the data flow."""
-
-    fixes: tuple[str, ...]
-    """Specific, actionable steps to resolve the error (3-5 items)."""
-
-    prevention: tuple[str, ...]
-    """Strategies to prevent similar errors in the future (2-3 items)."""
-
-    confidence: float = 0.5
-    """Confidence score 0.0-1.0; how sure is the AI about this analysis."""
-
-
 class ErrorAnalysis(ModelBase):
     """Analysis of an ADF error and recommended lineage checks."""
 
@@ -65,7 +46,6 @@ class ErrorAnalysis(ModelBase):
     severity: ErrorSeverity = ErrorSeverity.ERROR
     lineage_checkpoints: tuple[LineageCheckpoint, ...] = ()  # Recommendations
     suggested_lineage: tuple[ColumnJourney, ...] = ()  # Column lineage journeys to inspect
-    ai_suggestions: AISuggestion | None = None  # AI-powered analysis (optional)
     additional_notes: str = ""  # Extra context or follow-up steps
 
 

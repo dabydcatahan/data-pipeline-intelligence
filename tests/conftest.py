@@ -30,5 +30,4 @@ def settings() -> AppSettings:
         max_upload_bytes=1_000_000,
         allowed_extensions=(".json",),
         log_level="WARNING",
-        enable_llm_insights=False,
     )

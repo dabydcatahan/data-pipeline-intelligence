@@ -39,6 +39,18 @@ class Activity(ModelBase):
     column_mappings: tuple[tuple[str, str], ...] = ()
     type_properties: dict[str, object] = Field(default_factory=dict)
     is_recognized: bool = True
+    #: Name of the enclosing ``ForEach``/``Until``/``If``/``Switch`` activity, if
+    #: this activity was expanded from a container's nested activities (F027).
+    #: ``None`` for a top-level pipeline activity.
+    parent_activity: str | None = None
+    #: Which branch of the parent container this activity came from, e.g.
+    #: ``"loop"`` (ForEach/Until body), ``"true"`` / ``"false"`` (If), or
+    #: ``"case:<value>"`` / ``"default"`` (Switch). ``None`` for a top-level activity.
+    container_branch: str | None = None
+
+    @property
+    def is_nested(self) -> bool:
+        return self.parent_activity is not None
 
     @property
     def executes_data_flow(self) -> bool:

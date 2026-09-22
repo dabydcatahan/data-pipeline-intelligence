@@ -1,8 +1,7 @@
 """Provider abstraction for the AI enhancement layer (F017).
 
-Concrete implementations (``DeterministicInsightProvider``, ``LLMInsightProvider``)
-are added with F017. The interface is defined now so the rest of the app can
-depend on it and remain LLM-free.
+``DeterministicInsightProvider`` is the only concrete implementation; it is
+offline and deterministic. LLM-backed insights have been removed.
 """
 
 from __future__ import annotations

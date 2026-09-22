@@ -35,6 +35,14 @@ def test_pipeline_markdown_sections(read_fixture_bytes):
     assert "CustomerDataFlow" in md
 
 
+def test_pipeline_markdown_shows_nested_activity_container(read_fixture_bytes):
+    md = pipeline_markdown(_pipeline(read_fixture_bytes, "pipeline_control_flow.json"))
+    assert "| Name | Type | Container | Depends on | Inputs | Outputs | Data flow |" in md
+    assert "| CopyRegionRaw | Copy | ForEachRegion (loop) |" in md
+    assert "| CopyGoldTier | Copy | RouteByTier (case:gold) |" in md
+    assert "| ForEachRegion | ForEach | — |" in md
+
+
 def test_pipeline_markdown_flags_cycles(read_fixture_bytes):
     md = pipeline_markdown(_pipeline(read_fixture_bytes, "pipeline_cyclic.json"))
     assert "Circular dependency" in md

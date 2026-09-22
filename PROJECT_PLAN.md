@@ -7,11 +7,11 @@ Streamlit UI covers upload → dashboard → pipeline / data-flow explorers →
 column search (per-flow *and* stitched across every uploaded artifact) → lineage
 narrative + impact score + interactive graph → **Inventory** (sources / sinks /
 transformations / datasets) → documentation (Markdown + HTML export) → AI
-Insights (offline default, optional LLM). Remaining work is the section 16
+Insights (deterministic only; LLM support removed, see session 13). Remaining work is the section 16
 Release Checklist (coverage on core packages, Docker image build verification,
 security review of the upload path, 5 MiB performance check).
 
-**Last updated:** 2026-09-08 (session 12)
+**Last updated:** 2026-09-22 (session 16)
 
 **Verification (session 12):** `ruff check` clean · `ruff format --check` clean ·
 `mypy` clean (47 files) · `pytest` 175 passed (incl. 7 Streamlit `AppTest` smoke
@@ -145,7 +145,8 @@ flowchart TD
 | GitHub Actions | CI | Lint + format check + type check + tests on synthetic fixtures |
 
 Deferred until their feature: `pyvis`, `graphviz`, `jinja2` (documentation
-templates), `markdown` (HTML export), an LLM SDK (only behind `LLMInsightProvider`).
+templates), `markdown` (HTML export). An LLM SDK was briefly added behind
+`LLMInsightProvider` and removed in session 13 — insights are deterministic only.
 
 ## 6. Feature Catalogue
 
@@ -167,7 +168,7 @@ templates), `markdown` (HTML export), an LLM SDK (only behind `LLMInsightProvide
 | F014 | Data flow documentation generation | [x] (Markdown + HTML, incl. column lineage) |
 | F015 | Lineage visualization | [x] (Graphviz DOT; PyVis via `viz` extra) |
 | F016 | Column search | [x] (search box + picker in Column Lineage page; cross-artifact search TODO) |
-| F017 | AI insights (Deterministic + LLM providers) | [x] |
+| F017 | AI insights (Deterministic only; LLM support removed) | [x] |
 | F018 | Documentation export (Markdown / HTML) | [x] |
 | F019 | Error handling & user-facing warnings | [-] (core framework done) |
 | F020 | Security (size limits, type checks, no-persist, sanitization) | [-] (upload path done) |
@@ -470,7 +471,7 @@ templates), `markdown` (HTML export), an LLM SDK (only behind `LLMInsightProvide
 9. **F024/F016** Data Flow Explorer + Column Lineage / Impact UI + column search — ✅ done
 10. **F013/F014** Documentation engine — ✅ done (Markdown)
 11. **F018** Export (Markdown + HTML download) — ✅ done
-12. **F017** AI insight providers (Deterministic default, optional LLM) — ✅ done
+12. **F017** AI insight providers (Deterministic only; LLM support removed session 13) — ✅ done
 13. **F008** Pipeline / Copy-activity column lineage + cross-artifact stitching — ✅ done
 14. **F005–F007** Source / sink / transformation discovery (Inventory) — ✅ done
 15. **Release Checklist** (section 16) — ◀ next
@@ -499,7 +500,8 @@ templates), `markdown` (HTML export), an LLM SDK (only behind `LLMInsightProvide
 - No credentials, connection strings, linked-service secrets, or tokens are ever
   read, displayed, exported, or forwarded. Parser drops known secret-bearing fields.
 - Uploaded content is treated as untrusted data, isolated from application code.
-- No outbound network calls unless an LLM provider is explicitly configured and enabled.
+- No outbound network calls, ever — LLM insight support was removed in session 13;
+  the deterministic provider is offline-only.
 
 ## 11. Performance Requirements
 
@@ -528,8 +530,10 @@ templates), `markdown` (HTML export), an LLM SDK (only behind `LLMInsightProvide
 - **AI forbidden**: determining or altering lineage, inventing columns/edges,
   receiving raw uploaded JSON, being the source of any fact shown as authoritative.
 - Abstraction: `InsightProvider` interface.
-  - `DeterministicInsightProvider` — templated NL from the model; default, offline.
-  - `LLMInsightProvider` — optional; consumes sanitized `InsightRequest`; disabled unless configured.
+  - `DeterministicInsightProvider` — templated NL from the model; the only provider.
+  - An `LLMInsightProvider` existed briefly (session 10) and was removed in session 13:
+    it added an external dependency and network path with no compensating benefit at
+    this stage. May be revisited later behind the same `InsightProvider` interface.
 
 ## 13. Future Enhancements
 
@@ -626,6 +630,24 @@ extend. Ambiguous/unsupported input is reported via `confidence` ("high" /
 "partial" / "none") and `notes` rather than guessed — "Do not guess" (§12).
 *Date:* 2026-09-08
 
+**DEC-012** — Error analyzer patterns are data (JSON), not code; unrecognized-error
+capture is opt-in and out-of-scope of DEC-005
+*Decision:* `app/insights/error_patterns.json` holds the F025 regex ->
+error_type -> severity table plus per-type summary/next-steps text, loaded once
+at import. `AppSettings.error_misses_path` (env `ADFPI_ERROR_MISSES_PATH`,
+default `None`) is the **one** setting in the app that can enable writing
+anything to disk: when set, a user can explicitly click "Flag this error" on an
+`unknown_error` result to append it (redacted by
+`app/insights/error_feedback.py`) to that file for later review.
+*Reason:* (a) Adding a pattern shouldn't need a Python change/redeploy - a data
+file does. (b) DEC-005 ("no persistence") is scoped to *uploaded ADF JSON*,
+which is a confidential enterprise asset; pasted error text is a different,
+lower-stakes input a user is actively trying to share for help. Making capture
+opt-in (off by default, explicit per-click, redacted) extends the same
+"user data isn't silently retained" spirit to this one exception rather than
+breaking it.
+*Date:* 2026-09-22
+
 ## 15. Known Limitations
 
 - Pipeline column lineage covers **Copy activities with an explicit
@@ -657,18 +679,26 @@ extend. Ambiguous/unsupported input is reported via `confidence` ("high" /
   (`reduce`, `mapIndex`, …) and unrecognized characters yield
   `confidence="partial"`; `case()` branch conditions are treated as plain
   argument columns (not split by branch).
-- DFS coverage is structural for `source`, `derive`, `select` (`mapColumn`),
-  `aggregate` (`groupBy` + aggregations), `join`/`filter`/`union` (streams +
-  raw args). Other operators (`lookup`, `pivot`, `window`, `alterRow`,
-  `flatten`, …) are recognized and kept but their arguments are not yet
-  decomposed. Unknown operators are flagged, never fatal.
+- DFS coverage is structural for `source`, `derive`, `select`/`foldDown`
+  (`mapColumn`), `aggregate` (`groupBy` + aggregations), `join`/`lookup`/`filter`/
+  `union` (condition/argument expression decomposed into JOIN_KEY/LOOKUP/
+  FILTER/UNION edges) and `window` (`over`/`asc`/`desc`/`windowColumns`
+  decomposed into WINDOW edges; session 13). `pivot` decomposes `groupBy` (DIRECT)
+  and approximates aggregate output names from a literal `pivotBy()` value list
+  (AGGREGATE; session 13) - genuinely data-dependent otherwise. Remaining
+  operators (`unpivot`, `alterRow`, `parse`, `surrogateKey`, …) are recognized
+  and kept but their arguments are not yet decomposed. Unknown operators are
+  flagged, never fatal.
 - `split` branch streams are recorded on the statement (`output_branches`) but
   downstream references to a branch name are not yet linked in `stream_edges()`.
 - No cross-artifact stitching: a pipeline's `ExecuteDataFlow` reference and the
   uploaded data flow of that name are not yet joined into one graph.
-- Execution order uses `dependsOn` only; control-flow constructs (`ForEach`,
-  `If`, `Switch`, `Until`) are recorded as activities but their inner activities
-  are not yet expanded.
+- Execution order uses `dependsOn` only. Control-flow constructs (`ForEach`,
+  `Until`, `If`/`IfCondition`, `Switch`) have their inner activities recursively
+  expanded into `Pipeline.activities` (tagged `parent_activity`/
+  `container_branch`; session 13), so nested Copy/ExecuteDataFlow activities are
+  visible to lineage/documentation/inventory - but `execution_order()` still
+  treats them as a single flat DAG, not "runs once per loop iteration".
 - ARM-template parameter expressions in names are only partially unwrapped
   (`[concat(parameters('factoryName'), '/Name')]` → `Name`); arbitrary ARM
   expressions are left as-is with a warning.
@@ -884,14 +914,169 @@ passthrough when a select/Flatten auto-maps with no explicit `mapColumn`. The
 unrecognized-operator warning wording is calmer ("kept; treated as passthrough;
 lineage approximate"). Fixture `dataflow_flatten.json`. Total **178** tests.
 
+### Session 13 (2026-09-22) — Remove LLM/GPT4All AI integrations; deterministic only
+- Removed the F025 error-analyzer's optional GPT4All (`gpt4all_provider.py` /
+  `gpt4all_utils.py`) path: it required the `gpt4all` package, which broke on
+  Intel macOS (`sysctl.proc_translated` shell-out) and was never reachable from
+  the UI anyway (`analyze_error()` was never called with `use_ai=True`). Removed
+  `AISuggestion` model, `ErrorAnalysis.ai_suggestions`, `use_ai` param on
+  `analyze_error()` / `AnalysisService.analyze_error()`, `AIAnalysisError`, and
+  the dead "AI Diagnosis" UI block.
+- Removed F017's `LLMInsightProvider` (`app/insights/llm.py`) and
+  `SafeInsightProvider` (`app/insights/safe.py`) fallback wrapper.
+  `get_provider(settings)` now unconditionally returns
+  `DeterministicInsightProvider()`. Removed `AppSettings.enable_llm_insights` /
+  `llm_provider` / `llm_model` / `llm_api_key` / `llm_ready()`.
+- Removed `gpt4all` (hard dependency) and the `llm` extra (`anthropic`) from
+  `pyproject.toml`; dropped both from the mypy override list.
+- Rationale: the app's core value (deterministic, offline lineage) doesn't need
+  either AI path today, and both added dependency/attack surface without a
+  working feature behind them. `InsightProvider` remains an abstraction, so an
+  LLM provider can be reintroduced later without touching callers.
+- Tests: removed `test_gpt4all_provider.py` (16) and the LLM-specific cases in
+  `test_insights.py` / `test_config.py` / `TestAIIntegration` in
+  `test_error_analyzer.py`. Full suite green, `mypy app` clean (0 errors, down
+  from 4 pre-existing).
+
+### Session 14 (2026-09-22) — Control-flow expansion + window/pivot decomposition
+- **F027 Control-flow activity expansion:** `Activity` gained `parent_activity` /
+  `container_branch` (`"loop"`, `"true"`/`"false"`, `"case:<value>"`, `"default"`)
+  + `is_nested`. `app/parsers/pipeline_parser.py._parse_activities()` recursively
+  walks `ForEach`/`Until` (`typeProperties.activities`), `IfCondition`/`If`
+  (`ifTrueActivities`/`ifFalseActivities`) and `Switch` (`cases[].activities` +
+  `defaultActivities`), flattening every nested activity into
+  `Pipeline.activities` alongside the container itself (name collisions across
+  scopes warn, don't fail — ADF requires pipeline-wide unique names in practice).
+  This required **no changes** to `pipeline_lineage.py`, `inventory.py` or the
+  documentation generator: they already iterate `pipeline.activities` generically,
+  so nested Copy/ExecuteDataFlow activities became visible for free. Added a
+  "Container" column to the pipeline Activities doc table. Fixture
+  `pipeline_control_flow.json` (ForEach → If → Switch, 3 levels deep).
+- **`window` decomposition:** parses `over(...)` (partition columns),
+  `asc()`/`desc()` (sort columns) and `windowColumns(...)` (`target = expr`
+  targets) from `raw_arguments`; existing columns passthrough, new targets get
+  `RelationshipType.WINDOW` edges from both their expression's referenced
+  columns and the partition/sort columns. `RelationshipType.WINDOW` already
+  existed (graph/visualization/plain-language/impact-scoring all supported it)
+  but was never emitted anywhere until now. Fixture `dataflow_window.json`.
+- **`pivot` decomposition:** `groupBy()` columns → DIRECT (always knowable).
+  Aggregate expressions (`<expr> as <alias>`) → AGGREGATE edges; when
+  `pivotBy(col, [literal, values])` gives an explicit literal list, output
+  columns are approximated as `<alias>_<value>` (flagged as approximate - ADF's
+  `columnNaming` template may order/format differently) instead of the previous
+  behaviour of blindly passing through *every* input column unchanged, which was
+  actively wrong (pivot fundamentally restructures the schema). Without a
+  literal value list, only the groupBy columns are represented, with a warning
+  that the rest is data-dependent. `unpivot` was deliberately left as generic
+  passthrough-approximation (its DFS syntax differs enough from `pivot` that
+  guessing would risk being *confidently wrong*, worse than a flagged
+  approximation). Fixture `dataflow_pivot.json`.
+- Fixed stale compatibility-matrix claims in README/AGENTS/PROJECT_PLAN: several
+  rows already said "Partial - not decomposed" for `join`/`lookup`/`filter`/
+  `union`/`flatten`, which were in fact already fully decomposed (from earlier
+  sessions) — the docs just hadn't been updated to match the code.
+- Tests: `test_control_flow_activities_are_expanded`,
+  `test_control_flow_copy_lineage_is_visible`,
+  `test_pipeline_markdown_shows_nested_activity_container`,
+  `test_window_partition_sort_and_expression_columns_are_linked`,
+  `test_pivot_groupby_is_direct_and_values_approximated`. Full suite green,
+  `mypy app` clean, `ruff check` clean.
+
 **Next recommended task:** work the **section 16 Release Checklist**:
 1. Verify the Docker image builds and `streamlit run app/ui/app.py` serves inside
    the container.
-2. Security review of the upload → sanitization → AI-request path (size limit,
-   `json.loads`-only, no disk writes, secret scrub, sanitized `InsightRequest`,
-   HTML-escape in export).
+2. Security review of the upload → sanitization → insight-request path (size
+   limit, `json.loads`-only, no disk writes, secret scrub, sanitized
+   `InsightRequest`, HTML-escape in export).
 3. Performance check: parse + lineage + combined graph on a ~5 MiB synthetic
    pipeline / data flow; confirm the < 2 s / < 200 ms targets in §11 and add a
    `scripts/` benchmark.
 4. Final README compatibility-matrix + screenshots pass; tag a `0.1.0` release
    checklist review.
+
+Remaining lineage-completeness gaps (lower priority, all correctly flagged
+"Partial"/"Approx." in the compat matrix, not silently wrong): `unpivot`,
+`parse`, `surrogateKey`/`keyGenerate` argument decomposition; `execution_order()`
+doesn't model ForEach loop-iteration or If/Switch branch-exclusivity semantics
+(a loop body and both If branches all appear as one flat DAG); pipeline-dialect
+expression parser only extracts function names + parameter/variable refs, no
+column notion.
+
+### Session 15 (2026-09-22) — F025 error analyzer: real-error hardening pass
+- The regex classifier in `app/insights/error_analyzer.py` was tested only
+  against hand-written synthetic strings. Collected ~35 verbatim real-world ADF
+  error messages from Microsoft's official troubleshooting docs
+  (`data-flow-troubleshoot-guide`, `connector-troubleshoot-guide` - the
+  `DF-Executor-*` "Common error codes and messages" catalogue) and from real
+  Copy activity / SQL Server sink failures reported on Microsoft Q&A / Stack
+  Overflow (`ErrorCode=UserErrorInvalidColumnMappingColumnNotFound`, "Invalid
+  column name", "Violation of PRIMARY KEY constraint", "Cannot insert the value
+  NULL into column ... does not allow nulls", "String or binary data would be
+  truncated", "Conversion failed when converting ...", "FOREIGN KEY
+  constraint", etc.). Before this session **27 of 34** were misclassified as
+  `unknown_error`; after, all 34 classify correctly.
+- Added ~25 new `_ERROR_PATTERNS` regexes (column-mapping-not-found, SQL Server
+  NULL/truncation/conversion wording, DF-Executor expression/column-not-found
+  text, throttling/OOM/service-limit text, connection/auth failures) ordered
+  specific-before-generic per the existing convention; added 4 new error types
+  with checkpoints/summary/next-steps: `foreign_key_violation`,
+  `throttling_error`, `resource_exhausted`, `limit_exceeded`.
+- Fixed a real entity-extraction bug found while building the test corpus:
+  `_ENTITY_PATTERNS`' column/dataset/stream regexes matched an *unquoted* word
+  after "column"/"table"/"field", so messages like "column does not allow
+  nulls" or "table with a smaller column length" extracted `does`/`with`/`in`/
+  `is`/`has` as fake column names. Quotes are now required around the captured
+  name (real ADF/SQL error text always quotes identifiers); the noisy reversed
+  fallback pattern was removed. Added a `constraint` entity type for
+  `PK_x`/`FK_x` constraint names.
+- Tests: `tests/unit/test_error_analyzer.py` gained a parametrized
+  `test_real_world_error_is_classified` over 24 of the real messages (sourced
+  in a comment, citing Microsoft Learn + Q&A/Stack Overflow), asserting both
+  the correct `error_type` and that no stopword leaked into
+  `detected_entities`. Full suite green, `mypy app` / `ruff check` /
+  `ruff format --check` all clean.
+
+### Session 16 (2026-09-22) — Real column lineage in the UI + broader error coverage
+
+**Part 1 - the UI never rendered real column lineage.** `analyze_error()` already
+computed `ErrorAnalysis.suggested_lineage` (real `ColumnJourney` objects, matched
+against the combined graph of uploaded artifacts) via `_generate_lineage_suggestions`
+- the service layer was correct. The UI (`page_error_analyzer`) never displayed it;
+it only drew a graph inline inside a checkpoint of `checkpoint_type == "column"`,
+which `missing_column` (checkpoints are `stream`+`transformation`) - the single most
+common error type - never produces. So the one case a user would most want "show me
+this column's lineage" for silently never showed it. Replaced that dead-end code
+with a dedicated **Column Lineage** section driven directly by
+`analysis.suggested_lineage`: origin(s), sink columns reached, the plain-language
+`journey.narrative()`, and a graph focused on `journey.node_id`, for every detected
+column that has a real match - not a generic recommendation. Added
+`test_error_analyzer_shows_real_column_lineage_for_a_loaded_data_flow` (Streamlit
+AppTest) asserting the rendered page actually contains it, not just that the backend
+computed it.
+
+**Part 2 - broadened `error_patterns.json` from 60 to 108 patterns / 28 to 33 error
+types,** covering categories the user asked for by name: SQL Server (login/deadlock/
+timeout/syntax), PostgreSQL (`relation ... does not exist`, `violates not-null
+constraint`, `duplicate key value violates unique constraint`, `password
+authentication failed`, `permission denied for table`), Oracle (`ORA-00942`,
+`ORA-01017`), MySQL (`doesn't exist`, `Access denied for user`), Parquet (all of
+`connector-troubleshoot-parquet`'s error codes: invalid file, column-not-found,
+type-conversion, schema/column-count mismatch, arithmetic overflow), self-hosted
+Integration Runtime (`self-hosted-integration-runtime-troubleshoot-guide`:
+registration failure, missing auth key, offline node, missing Java Runtime, JVM
+creation failure), missing ADF components (broken dataset/linked-service/pipeline/
+trigger references - distinct from `dataset_not_found`, which is about a *runtime*
+datastore object missing, not a broken JSON reference), and Data Flow debug-session
+errors (expired/terminated session, `Spark cluster not found`). Added 5 new
+`error_type`s with their own tailored (non-generic) checkpoints/summary/next-steps:
+`schema_mismatch`, `transient_db_error`, `debug_session_error`,
+`integration_runtime_error`, `component_not_found` - each explicitly says the
+problem is *not* a lineage/data issue (infra, a broken reference, or transient
+concurrency), since routing those to "trace column lineage" would be actively
+misleading.
+- Verified against a 48-case real-world corpus (all 33 error types hit at least
+  once) before writing it up as 29 new parametrized test cases in
+  `test_error_analyzer.py`, plus a check that the 5 new infra-flavored types never
+  fall through to the generic "trace complete lineage path" checkpoint.
+- Full suite green (262 tests), `mypy app` / `ruff check` / `ruff format --check`
+  all clean.

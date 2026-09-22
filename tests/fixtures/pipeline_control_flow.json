@@ -1,0 +1,120 @@
+{
+  "name": "RegionRolloutPipeline",
+  "properties": {
+    "description": "ForEach over regions, with a nested If branch and Switch on region tier.",
+    "activities": [
+      {
+        "name": "ForEachRegion",
+        "type": "ForEach",
+        "typeProperties": {
+          "items": { "value": "@pipeline().parameters.regions", "type": "Expression" },
+          "isSequential": false,
+          "activities": [
+            {
+              "name": "CopyRegionRaw",
+              "type": "Copy",
+              "inputs": [{ "referenceName": "RawRegion", "type": "DatasetReference" }],
+              "outputs": [{ "referenceName": "StageRegion", "type": "DatasetReference" }],
+              "typeProperties": {
+                "source": { "type": "JsonSource" },
+                "sink": { "type": "ParquetSink" },
+                "translator": {
+                  "type": "TabularTranslator",
+                  "mappings": [
+                    { "source": { "name": "RegionId", "type": "String" }, "sink": { "name": "region_id", "type": "String" } },
+                    { "source": { "name": "Amount", "type": "Decimal" }, "sink": { "name": "amount", "type": "Decimal" } }
+                  ]
+                }
+              }
+            },
+            {
+              "name": "CheckHighVolume",
+              "type": "IfCondition",
+              "dependsOn": [{ "activity": "CopyRegionRaw", "dependencyConditions": ["Succeeded"] }],
+              "typeProperties": {
+                "expression": { "value": "@greater(activity('CopyRegionRaw').output.rowsCopied, 10000)", "type": "Expression" },
+                "ifTrueActivities": [
+                  {
+                    "name": "RunHighVolumeFlow",
+                    "type": "ExecuteDataFlow",
+                    "typeProperties": {
+                      "dataflow": { "referenceName": "HighVolumeEnrichFlow", "type": "DataFlowReference" }
+                    }
+                  }
+                ],
+                "ifFalseActivities": [
+                  {
+                    "name": "RunLowVolumeFlow",
+                    "type": "ExecuteDataFlow",
+                    "typeProperties": {
+                      "dataflow": { "referenceName": "LowVolumeEnrichFlow", "type": "DataFlowReference" }
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "name": "RouteByTier",
+              "type": "Switch",
+              "dependsOn": [{ "activity": "CheckHighVolume", "dependencyConditions": ["Succeeded"] }],
+              "typeProperties": {
+                "on": { "value": "@pipeline().parameters.tier", "type": "Expression" },
+                "cases": [
+                  {
+                    "value": "gold",
+                    "activities": [
+                      {
+                        "name": "CopyGoldTier",
+                        "type": "Copy",
+                        "inputs": [{ "referenceName": "StageRegion", "type": "DatasetReference" }],
+                        "outputs": [{ "referenceName": "GoldTierSink", "type": "DatasetReference" }],
+                        "typeProperties": {
+                          "source": { "type": "ParquetSource" },
+                          "sink": { "type": "ParquetSink" },
+                          "translator": {
+                            "type": "TabularTranslator",
+                            "mappings": [
+                              { "source": { "name": "region_id", "type": "String" }, "sink": { "name": "region_id", "type": "String" } },
+                              { "source": { "name": "amount", "type": "Decimal" }, "sink": { "name": "amount", "type": "Decimal" } }
+                            ]
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "value": "silver",
+                    "activities": [
+                      {
+                        "name": "CopySilverTier",
+                        "type": "Copy",
+                        "inputs": [{ "referenceName": "StageRegion", "type": "DatasetReference" }],
+                        "outputs": [{ "referenceName": "SilverTierSink", "type": "DatasetReference" }],
+                        "typeProperties": {
+                          "source": { "type": "ParquetSource" },
+                          "sink": { "type": "ParquetSink" }
+                        }
+                      }
+                    ]
+                  }
+                ],
+                "defaultActivities": [
+                  {
+                    "name": "CopyDefaultTier",
+                    "type": "Copy",
+                    "inputs": [{ "referenceName": "StageRegion", "type": "DatasetReference" }],
+                    "outputs": [{ "referenceName": "DefaultTierSink", "type": "DatasetReference" }],
+                    "typeProperties": {
+                      "source": { "type": "ParquetSource" },
+                      "sink": { "type": "ParquetSink" }
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

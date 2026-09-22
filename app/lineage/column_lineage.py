@@ -21,7 +21,14 @@ aggregate               output schema = groupBy keys (DIRECT) + aggregate target
 union                   output schema = union of input schemas by name; UNION edges
 split                   passthrough to the base node and to every branch stream;
                         record condition columns as CONDITIONAL_SPLIT
-other / unknown          passthrough all input columns (approximate) + a warning
+window                  keep every input column (PASSTHROUGH) + windowColumns() targets
+                        (WINDOW, deps from over()/asc()/desc() partition+sort columns and
+                        the expression parser)
+pivot                   output schema = groupBy keys (DIRECT) + approximated
+                        ``<alias>_<value>`` targets when pivotBy() gives a literal value
+                        list (AGGREGATE); non-key, non-aggregated columns are dropped -
+                        output names are inherently data-dependent, so this is approximate
+other / unknown         passthrough all input columns (approximate) + a warning
 sink                    output schema = feeding stream's schema; DIRECT edges
 ======================  ==================================================================
 """
@@ -86,6 +93,52 @@ def _resolve_rule_name(lhs: str, column: str) -> str | None:
 
 #: A DFS option argument such as ``disjoint: false`` or ``joinType: 'inner'``.
 _OPTION_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\s*:")
+
+
+def _split_as_alias(text: str) -> tuple[str, str | None]:
+    """Split ``<expr> as <alias>`` on a top-level (bracket/quote-safe) `` as `` keyword."""
+    depth = 0
+    quote: str | None = None
+    n = len(text)
+    for i in range(n - 3):
+        ch = text[i]
+        if quote is not None:
+            if ch == quote:
+                quote = None
+            continue
+        if ch in "'\"":
+            quote = ch
+            continue
+        if ch in "([{":
+            depth += 1
+            continue
+        if ch in ")]}":
+            depth = max(0, depth - 1)
+            continue
+        if depth == 0 and text[i : i + 4] == " as ":
+            return text[:i].strip(), text[i + 4 :].strip()
+    return text.strip(), None
+
+
+def _parse_literal_list(text: str) -> list[str] | None:
+    """Parse a ``['a', 'b', 'c']``-style literal array into plain string values.
+
+    Returns ``None`` when any element is not a literal (e.g. an expression or a
+    parameter reference), since the values then can't be resolved statically.
+    """
+    t = text.strip()
+    if not (t.startswith("[") and t.endswith("]")):
+        return None
+    values: list[str] = []
+    for item in split_top_level(t[1:-1]):
+        item = item.strip()
+        if len(item) >= 2 and item[0] in "'\"" and item[-1] == item[0]:
+            values.append(item[1:-1])
+        elif re.fullmatch(r"-?\d+(\.\d+)?", item):
+            values.append(item)
+        else:
+            return None
+    return values or None
 
 
 @dataclass(frozen=True)
@@ -272,6 +325,8 @@ class _Builder:
             "aggregate": self._op_aggregate,
             "union": self._op_union,
             "split": self._op_split,
+            "window": self._op_window,
+            "pivot": self._op_pivot,
         }.get(op)
         if handler is not None:
             handler(tr, inputs)
@@ -516,6 +571,176 @@ class _Builder:
             split_columns=tuple(_dedup(condition_columns)),
         )
         self.schema[tr.name] = produced
+
+    def _op_window(self, tr: DataFlowTransformation, inputs: list[str]) -> None:
+        """`over(...)` = partition columns, `asc/desc(...)` = sort columns,
+        `windowColumns(...)` = new output columns (`target = expr`)."""
+        partition_cols: list[str] = []
+        sort_cols: list[str] = []
+        window_col_parts: list[str] = []
+        for part in split_top_level(tr.raw_arguments):
+            inside = _strip_call(part, "over")
+            if inside is not None:
+                partition_cols.extend(c.strip() for c in split_top_level(inside) if c.strip())
+                continue
+            matched = False
+            for kw in ("asc", "desc"):
+                inside = _strip_call(part, kw)
+                if inside is not None:
+                    items = split_top_level(inside)
+                    if items:
+                        sort_cols.append(items[0].strip())
+                    matched = True
+                    break
+            if matched:
+                continue
+            inside = _strip_call(part, "windowColumns")
+            if inside is not None:
+                window_col_parts = split_top_level(inside)
+
+        targets: set[str] = set()
+        window_columns: list[tuple[str, str]] = []
+        for part in window_col_parts:
+            assignment = _split_first_assignment(part)
+            if assignment:
+                targets.add(assignment[0].strip())
+                window_columns.append((assignment[0].strip(), assignment[1].strip()))
+
+        carried = self._passthrough(tr, inputs, skip=targets)
+        context_columns = _dedup([*partition_cols, *sort_cols])
+
+        self.graph.register_stream(
+            tr.name,
+            StreamKind.TRANSFORMATION.value,
+            operator="window",
+            window_partition_by=tuple(_dedup(partition_cols)),
+            window_order_by=tuple(_dedup(sort_cols)),
+        )
+
+        produced = list(carried)
+        for target, expr in window_columns:
+            produced.append(target)
+            self._add_output(tr.name, target)
+            analysis = analyze_expression(expr)
+            referenced = _dedup([*analysis.referenced_columns, *context_columns])
+            if not referenced:
+                self.warn(
+                    f"Data flow '{self.df.name}': could not determine the source columns "
+                    f"for '{tr.name}.{target}' (window expression: {expr!r})."
+                )
+            for column in referenced:
+                for src in self._locate(column, inputs):
+                    self.graph.add_dependency(
+                        src,
+                        column,
+                        tr.name,
+                        target,
+                        relationship=RelationshipType.WINDOW,
+                        transformation=tr.name,
+                        transformation_type="window",
+                        expression=expr,
+                    )
+        self.schema[tr.name] = _dedup(produced)
+
+    def _op_pivot(self, tr: DataFlowTransformation, inputs: list[str]) -> None:
+        """Decompose what's statically knowable; pivoted column *names* are data-dependent.
+
+        `groupBy(...)` columns survive unchanged (DIRECT). The aggregate
+        expression(s) - `<expr> as <alias>` - are linked (AGGREGATE) to their
+        source columns; when `pivotBy(col, [literal, values])` gives an explicit
+        literal value list, output columns are approximated as
+        `<alias>_<value>` (flagged as approximate - ADF's actual `columnNaming`
+        template may order/format them differently). Columns that are neither a
+        groupBy key nor referenced by an aggregate expression do **not** survive
+        a pivot and are correctly dropped, unlike the generic passthrough rule.
+        """
+        parts = split_top_level(tr.raw_arguments)
+        group_cols: list[str] = []
+        pivot_column: str | None = None
+        pivot_values: list[str] | None = None
+        agg_parts: list[str] = []
+        for part in parts:
+            inside = _strip_call(part, "groupBy")
+            if inside is not None:
+                group_cols.extend(c.strip() for c in split_top_level(inside) if c.strip())
+                continue
+            inside = _strip_call(part, "pivotBy")
+            if inside is not None:
+                items = split_top_level(inside)
+                if items:
+                    pivot_column = items[0].strip()
+                if len(items) > 1:
+                    pivot_values = _parse_literal_list(items[1])
+                continue
+            if _OPTION_RE.match(part):
+                continue
+            agg_parts.append(part)
+
+        produced: list[str] = []
+        for key in _dedup(group_cols):
+            produced.append(key)
+            self._add_output(tr.name, key)
+            for src in self._locate(key, inputs):
+                self.graph.add_dependency(
+                    src,
+                    key,
+                    tr.name,
+                    key,
+                    relationship=RelationshipType.DIRECT,
+                    transformation=tr.name,
+                    transformation_type="pivot",
+                )
+
+        approximated_names = False
+        for part in agg_parts:
+            expr, alias = _split_as_alias(part)
+            analysis = analyze_expression(expr)
+            source_columns = _dedup(
+                [*analysis.referenced_columns, *([pivot_column] if pivot_column else [])]
+            )
+            if pivot_values and alias:
+                approximated_names = True
+                for value in pivot_values:
+                    target = f"{alias}_{value}"
+                    produced.append(target)
+                    self._add_output(tr.name, target)
+                    for column in source_columns:
+                        for src in self._locate(column, inputs):
+                            self.graph.add_dependency(
+                                src,
+                                column,
+                                tr.name,
+                                target,
+                                relationship=RelationshipType.AGGREGATE,
+                                transformation=tr.name,
+                                transformation_type="pivot",
+                                expression=expr,
+                            )
+            # Without a literal pivotBy() value list, the output column names are
+            # genuinely data-dependent; we cannot link the aggregate expression to
+            # a named output column at all, so nothing further is added here.
+
+        if approximated_names:
+            self.warn(
+                f"Data flow '{self.df.name}': pivot '{tr.name}' output column names are "
+                "approximated as `<alias>_<pivotValue>` from the literal pivotBy() values; "
+                "ADF's actual columnNaming template may format them differently."
+            )
+        if not pivot_values or not agg_parts:
+            self.warn(
+                f"Data flow '{self.df.name}': pivot '{tr.name}' produces data-dependent "
+                "output columns that cannot be fully determined from the JSON alone; only "
+                "the groupBy columns are represented in lineage."
+            )
+
+        self.graph.register_stream(
+            tr.name,
+            StreamKind.TRANSFORMATION.value,
+            operator="pivot",
+            pivot_by=pivot_column or "",
+            pivot_group_by=tuple(_dedup(group_cols)),
+        )
+        self.schema[tr.name] = _dedup(produced)
 
     def _op_join_like(self, tr: DataFlowTransformation, inputs: list[str]) -> None:
         produced = self._passthrough(tr, inputs)

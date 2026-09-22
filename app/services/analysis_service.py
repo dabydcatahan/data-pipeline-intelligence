@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from app.core.config import AppSettings, get_settings
 from app.core.exceptions import ADFIntelligenceError, UnsupportedArtifactError
@@ -24,6 +25,7 @@ from app.lineage.stitch import build_combined_lineage, data_flow_bindings, share
 from app.lineage.traversal import explain
 from app.models.artifact import ArtifactKind, ParsedArtifact
 from app.models.dataflow import DataFlow
+from app.models.error_analysis import ErrorAnalysis
 from app.models.impact import ImpactReport
 from app.models.lineage import ColumnJourney
 from app.models.pipeline import Pipeline
@@ -466,17 +468,15 @@ class AnalysisService:
         self,
         error_text: str,
         session: AnalysisSession | None = None,
-        use_ai: bool = False,
-    ):
+    ) -> ErrorAnalysis:
         """Analyze an ADF error and recommend lineage checkpoints to inspect.
 
         Args:
             error_text: The ADF error message or output
             session: Optional AnalysisSession for lineage context
-            use_ai: If True, enhance analysis with AI suggestions (optional)
 
         Returns:
-            ErrorAnalysis with detected entities, checkpoints, and optional AI suggestions
+            ErrorAnalysis with detected entities and checkpoints
         """
         from app.insights.error_analyzer import analyze_error
 
@@ -490,7 +490,26 @@ class AnalysisService:
                 # If lineage building fails, continue without graph context
                 pass
 
-        return analyze_error(error_text, graph=graph, use_ai=use_ai)
+        return analyze_error(error_text, graph=graph)
+
+    @property
+    def error_misses_enabled(self) -> bool:
+        """Whether the opt-in "flag an unrecognized error" feature is configured."""
+        return bool(self._settings.error_misses_path)
+
+    def flag_unrecognized_error(self, error_text: str) -> None:
+        """Record an unrecognized error for later pattern review (F025, opt-in).
+
+        Only ever called on explicit user action from the UI. Raises if
+        ``error_misses_path`` isn't configured or the write fails - the caller
+        decides how to surface that.
+        """
+        if not self._settings.error_misses_path:
+            raise ValueError("error_misses_path is not configured; flagging is disabled.")
+
+        from app.insights.error_feedback import record_unrecognized_error
+
+        record_unrecognized_error(error_text, Path(self._settings.error_misses_path))
 
     @staticmethod
     def lineage_dot(

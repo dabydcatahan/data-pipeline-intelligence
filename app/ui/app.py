@@ -812,22 +812,18 @@ def page_error_analyzer(service: AnalysisService, session: AnalysisSession) -> N
             st.session_state.pop("error_analyzer_text", None)
             st.session_state.pop("error_analyzer_result", None)
             st.session_state.pop("error_analyzer_paste_input", None)
+            st.session_state.pop("error_analyzer_flagged_text", None)
             st.rerun()
 
     # Reuse the cached analysis unless the error text has changed
     cached = st.session_state.get("error_analyzer_result")
-    cache_valid = (
-        cached is not None
-        and cached[0] == error_text
-    )
+    cache_valid = cached is not None and cached[0] == error_text
 
     if cache_valid:
         analysis = cached[1]
     else:
         try:
-            analysis = service.analyze_error(
-                error_text, session=session
-            )
+            analysis = service.analyze_error(error_text, session=session)
         except Exception as e:
             st.error(f"Error analysis failed: {e}")
             return
@@ -849,33 +845,6 @@ def page_error_analyzer(service: AnalysisService, session: AnalysisSession) -> N
 
     st.markdown("**Summary**")
     st.write(analysis.error_summary)
-
-    # AI Suggestions section (if available)
-    if analysis.ai_suggestions:
-        st.divider()
-        st.subheader("🤖 AI Diagnosis")
-
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            st.markdown("**Root Cause**")
-            st.write(analysis.ai_suggestions.root_cause)
-
-            st.markdown("**Diagnosis**")
-            st.write(analysis.ai_suggestions.diagnosis)
-        with col2:
-            confidence_pct = int(analysis.ai_suggestions.confidence * 100)
-            st.metric("AI Confidence", f"{confidence_pct}%")
-
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("**Fixes**")
-            for i, fix in enumerate(analysis.ai_suggestions.fixes, 1):
-                st.write(f"{i}. {fix}")
-
-        with col2:
-            st.markdown("**Prevention**")
-            for i, prevention in enumerate(analysis.ai_suggestions.prevention, 1):
-                st.write(f"{i}. {prevention}")
 
     # Detected entities
     if analysis.detected_entities:
@@ -901,33 +870,80 @@ def page_error_analyzer(service: AnalysisService, session: AnalysisSession) -> N
                     if len(checkpoint.target_entities) > 5:
                         affected += f", +{len(checkpoint.target_entities) - 5} more"
                     st.caption(f"Affects: {affected}")
-
-                # Try to show lineage context
-                if session.artifacts and checkpoint.checkpoint_type == "column":
-                    for entity in checkpoint.target_entities:
-                        try:
-                            lineage = service.combined_lineage(session)
-                            matches = lineage.graph.find(entity.name)
-                            if matches:
-                                with st.expander(f"📊 Show lineage for {entity.name}"):
-                                    st.graphviz_chart(
-                                        service.lineage_dot(
-                                            lineage, focus=entity.name, direction="both"
-                                        ),
-                                        use_container_width=True,
-                                    )
-                        except Exception as e:
-                            st.caption(f"(Could not visualize lineage: {e})")
             with col2:
                 sev_icon = severity_icon.get(checkpoint.severity.value, "⚪")
                 st.caption(f"{sev_icon} {checkpoint.severity.value}")
     else:
         st.info("No specific checkpoints recommended for this error type.")
 
+    # Actual column lineage for any column(s) this error mentions - computed against
+    # the real uploaded data flow(s)/pipeline(s), not a generic recommendation.
+    st.markdown("**Column Lineage**")
+    if analysis.suggested_lineage:
+        st.caption(
+            "Real lineage for the column(s) detected in this error, from your uploaded artifacts."
+        )
+        try:
+            lineage = service.combined_lineage(session)
+        except Exception as e:
+            st.warning(f"Could not rebuild the lineage graph to render this: {e}")
+            lineage = None
+        for journey in analysis.suggested_lineage:
+            st.markdown(f"**`{journey.stream}.{journey.column}`**")
+            cols = st.columns(2)
+            with cols[0]:
+                st.caption("Origin(s)")
+                st.write(", ".join(journey.origins) or "_this is a source column_")
+            with cols[1]:
+                st.caption("Sink columns reached")
+                st.write(", ".join(journey.sink_columns) or "_none_")
+            st.code(journey.narrative() or "(no upstream steps)", language="text")
+            if lineage is not None:
+                with st.expander(f"📊 Lineage graph for {journey.column}", expanded=False):
+                    st.graphviz_chart(
+                        service.lineage_dot(lineage, focus=journey.node_id, direction="both"),
+                        use_container_width=True,
+                    )
+    elif session.artifacts and analysis.detected_entities:
+        st.caption(
+            "None of the detected entities matched a column in your uploaded "
+            "artifacts — check the spelling, or upload the relevant data flow/pipeline."
+        )
+    else:
+        st.caption("Upload the relevant data flow or pipeline to see real column lineage here.")
+
     # Additional notes
     if analysis.additional_notes:
         st.markdown("**Next Steps**")
         st.info(analysis.additional_notes)
+
+    # Unrecognized pattern: let the user opt in to flagging it, or fall back to a
+    # copy-to-clipboard nudge if the team hasn't configured error_misses_path.
+    if analysis.inferred_error_type == "unknown_error":
+        st.divider()
+        st.markdown("**Unrecognized error pattern**")
+        if service.error_misses_enabled:
+            st.warning(
+                "This error text didn't match any known pattern — the recommendation "
+                "above is a generic fallback, not a specific diagnosis."
+            )
+            flagged_key = "error_analyzer_flagged_text"
+            if st.session_state.get(flagged_key) == error_text:
+                st.success("Flagged — thanks, this will help expand the analyzer.")
+            elif st.button("🚩 Flag this error as unrecognized"):
+                try:
+                    service.flag_unrecognized_error(error_text)
+                except Exception as e:
+                    st.error(f"Couldn't save this: {e}")
+                else:
+                    st.session_state[flagged_key] = error_text
+                    st.rerun()
+        else:
+            st.info(
+                "This error text didn't match any known pattern. Copy it from "
+                "'Show original error text' below and share it with your team so "
+                "this pattern can be added."
+            )
 
     # Show raw error for reference
     with st.expander("Show original error text"):

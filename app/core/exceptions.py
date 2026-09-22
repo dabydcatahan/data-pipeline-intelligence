@@ -72,16 +72,3 @@ class LineageError(ADFIntelligenceError):
     """Raised by the lineage engine when a graph operation cannot be completed."""
 
     category = "Lineage error"
-
-
-class AIAnalysisError(ADFIntelligenceError):
-    """Raised when AI-powered error analysis fails.
-
-    This can be due to:
-    - GPT4All not installed
-    - Model download failure
-    - Model inference error
-    - Response parsing error
-    """
-
-    category = "AI analysis error"

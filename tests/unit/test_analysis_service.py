@@ -1,4 +1,5 @@
 import pytest
+from app.core.config import AppSettings
 from app.core.exceptions import InvalidJsonError, UnsupportedArtifactError
 from app.models.artifact import ArtifactKind
 from app.services.analysis_service import AnalysisService, AnalysisSession
@@ -198,3 +199,20 @@ def test_data_flow_chain_status_confirms_dataset_link_when_both_uploaded(
     assert second.linked_upstream == ("CustomerEnrichFlow",)
     assert second.unlinked_upstream == ()
     assert second.shared_datasets == (("CustomerEnrichFlow", ("DimCustomer",)),)
+
+
+def test_error_misses_disabled_by_default(service):
+    assert service.error_misses_enabled is False
+    with pytest.raises(ValueError, match="not configured"):
+        service.flag_unrecognized_error("some error")
+
+
+def test_flag_unrecognized_error_writes_when_configured(tmp_path):
+    misses_path = tmp_path / "unrecognized.jsonl"
+    svc = AnalysisService(AppSettings(_env_file=None, error_misses_path=str(misses_path)))
+
+    assert svc.error_misses_enabled is True
+    svc.flag_unrecognized_error("Something truly novel happened")
+
+    assert misses_path.exists()
+    assert "Something truly novel happened" in misses_path.read_text()

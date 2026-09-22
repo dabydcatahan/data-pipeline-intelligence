@@ -39,11 +39,13 @@ class AppSettings(BaseSettings):
     log_level: LogLevel = "INFO"
     log_format: LogFormat = "text"
 
-    # AI insights (enhancement layer only)
-    enable_llm_insights: bool = False
-    llm_provider: str | None = None
-    llm_model: str | None = None
-    llm_api_key: str | None = None
+    # Error analyzer: opt-in local capture of unrecognized errors (F025).
+    # None (default) means the feature is off - nothing is ever written to disk.
+    # Set to a file path to let a user explicitly flag an unrecognized error from
+    # the UI; the text is redacted (app.insights.error_feedback) before being
+    # appended. This is the ONLY place in the app that persists anything, and only
+    # on explicit user action - never automatic, never for uploaded ADF JSON.
+    error_misses_path: str | None = None
 
     @field_validator("allowed_extensions", mode="before")
     @classmethod
@@ -60,12 +62,6 @@ class AppSettings(BaseSettings):
     @property
     def max_upload_mib(self) -> float:
         return self.max_upload_bytes / (1024 * 1024)
-
-    def llm_ready(self) -> bool:
-        """True only when LLM insights are enabled *and* fully configured."""
-        return bool(
-            self.enable_llm_insights and self.llm_provider and self.llm_model and self.llm_api_key
-        )
 
 
 @lru_cache(maxsize=1)

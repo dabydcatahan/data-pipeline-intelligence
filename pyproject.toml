@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "data-pipeline-intelligence"
 version = "0.1.0"
-description = "Automated Azure Data Factory column-level lineage, documentation & AI insights (offline, upload-driven)."
+description = "Automated Azure Data Factory column-level lineage, documentation & deterministic AI insights (offline, upload-driven)."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Proprietary" }
@@ -17,17 +17,12 @@ dependencies = [
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
     "networkx>=3.3",
-    "gpt4all>=2.1.0",
 ]
 
 [project.optional-dependencies]
 viz = [
     "pyvis>=0.3.2",
     "graphviz>=0.20",
-]
-llm = [
-    # Optional. Only imported by app/insights/llm.py when explicitly enabled.
-    "anthropic>=0.34",
 ]
 dev = [
     "pytest>=8.2",
@@ -42,6 +37,9 @@ adf-intelligence = "app.ui.launch:main"
 
 [tool.setuptools.packages.find]
 include = ["app*"]
+
+[tool.setuptools.package-data]
+"app.insights" = ["error_patterns.json"]
 
 [tool.ruff]
 line-length = 100
@@ -74,7 +72,7 @@ plugins = ["pydantic.mypy"]
 exclude = ["^app/ui/"]
 
 [[tool.mypy.overrides]]
-module = ["networkx.*", "pyvis.*", "graphviz.*", "streamlit.*", "anthropic.*", "gpt4all.*"]
+module = ["networkx.*", "pyvis.*", "graphviz.*", "streamlit.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

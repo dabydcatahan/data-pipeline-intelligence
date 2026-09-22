@@ -168,11 +168,12 @@ def pipeline_markdown(pipeline: Pipeline) -> str:
     out += ["## Activities", ""]
     out += [
         _md_table(
-            ["Name", "Type", "Depends on", "Inputs", "Outputs", "Data flow"],
+            ["Name", "Type", "Container", "Depends on", "Inputs", "Outputs", "Data flow"],
             [
                 (
                     a.name,
                     a.type + ("" if a.is_recognized else " (unrecognized)"),
+                    f"{a.parent_activity} ({a.container_branch})" if a.is_nested else "—",
                     _joined(a.depends_on_names),
                     _joined(r.name for r in a.inputs),
                     _joined(r.name for r in a.outputs),

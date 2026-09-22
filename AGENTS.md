@@ -29,7 +29,7 @@ Upload JSON → Parse (scrub secrets) → Normalize to models → Lineage engine
 | **Models** | `app.models` | Domain objects (Pipeline, DataFlow, Column, etc.) |
 | **Parsers** | `app.parsers` | Ingesting ADF JSON, secret scrubbing, validation |
 | **Lineage** | `app.lineage` | Column-level graph, impact scoring, traversal (deterministic) |
-| **Insights** | `app.insights` | AI enhancement layer (data sanitization, LLM integration) |
+| **Insights** | `app.insights` | AI enhancement layer (data sanitization, deterministic templating) |
 | **Documentation** | `app.documentation` | Markdown/HTML generation from models |
 | **Services** | `app.services` | Orchestration (AnalysisSession, Inventory) |
 | **UI** | `app.ui` | Streamlit pages (thin, untyped, read-only model access) |
@@ -100,7 +100,7 @@ descendants = graph.downstream_nodes("source::id")
 ```
 
 ❌ **DON'T:**
-- Use graph for anything other than structure (no LLM-generated edges)
+- Use graph for anything other than structure (no AI-generated edges)
 - Assume edge labels are definitive (inspect node metadata for details)
 
 ### Type Hints (Strict Mypy Required)
@@ -197,9 +197,9 @@ def test_parse_valid_pipeline(fixtures_dir):
 ### Modifying AI insights
 
 1. **Sanitization first:** Update `app/insights/sanitize.py` if new facts need exposure
-2. **InsightProvider:** Implement in `app/insights/` (deterministic or LLM)
-3. **Safety:** Use `SafeInsightProvider` wrapper for LLM calls (catches errors, falls back)
-4. Never pass raw JSON to AI; only use `InsightRequest` (structural facts)
+2. **InsightProvider:** Implement in `app/insights/` (deterministic only; LLM providers
+   have been removed — see PROJECT_PLAN.md for the decision)
+3. Never pass raw JSON to AI; only use `InsightRequest` (structural facts)
 
 ### Adding a Streamlit page
 
@@ -217,10 +217,6 @@ Environment-driven, prefix `ADFPI_`:
 ADFPI_MAX_UPLOAD_BYTES=5242880          # Default: 5 MiB
 ADFPI_LOG_LEVEL=INFO                     # Default: WARNING
 ADFPI_LOG_FORMAT=text                    # or 'json'
-ADFPI_ENABLE_LLM_INSIGHTS=true           # Default: false
-ADFPI_LLM_PROVIDER=anthropic             # Only option currently
-ADFPI_LLM_MODEL=claude-3-5-sonnet-20241022
-ADFPI_LLM_API_KEY=sk-...
 ```
 
 See `app/core/config.py` for all settings and defaults.
@@ -243,6 +239,9 @@ Keys matching `SECRET_KEY_HINTS` in `app.parsers.base` are redacted **before** a
 ### In-Memory Processing (No Persistence)
 
 All uploads are processed in-memory; nothing is persisted to disk by design (DEC-005).
+The one exception is opt-in and out of scope of DEC-005: the Error Analyzer's
+"Flag this error" button, gated by `AppSettings.error_misses_path` (`None`/off by
+default) — see DEC-012.
 
 ## Workflow & Quality Gates
 
@@ -272,7 +271,7 @@ pytest --cov=app --cov-report=term-missing  # Tests + coverage (91% target)
 
 ### Mypy overrides (known stubs missing):
 
-- networkx, pyvis, graphviz, streamlit, anthropic (stubs not available; overrides silently used)
+- networkx, pyvis, graphviz, streamlit (stubs not available; overrides silently used)
 
 ## Feature Status
 
@@ -282,7 +281,7 @@ See [PROJECT_PLAN.md](PROJECT_PLAN.md#3-feature-catalogue) for detailed status.
 
 **New (F025):** Error Analysis — Parse ADF error messages and recommend lineage inspection checkpoints.
 
-**Partial:** Control-flow nesting (ForEach/If), join/lookup condition decomposition, higher-order expressions.
+**Partial:** `pivot` (groupBy + approximated aggregate columns only), `unpivot`/`parse`/`surrogateKey` (passthrough approximation), higher-order expressions (`reduce`, `mapIndex`, …).
 
 **Known unsupported:** Azure API, credentials, PowerBI, Spark lineage.
 

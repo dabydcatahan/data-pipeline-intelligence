@@ -1,0 +1,25 @@
+{
+  "name": "QuarterlySalesPivotFlow",
+  "properties": {
+    "type": "MappingDataFlow",
+    "typeProperties": {
+      "sources": [
+        { "name": "SalesSource", "dataset": { "referenceName": "SalesDs", "type": "DatasetReference" } }
+      ],
+      "sinks": [
+        { "name": "PivotSink", "dataset": { "referenceName": "QuarterlySalesDs", "type": "DatasetReference" } }
+      ],
+      "transformations": [
+        { "name": "PivotByQuarter" }
+      ],
+      "scriptLines": [
+        "source(output(customer_id as string, quarter as string, amount as double)) ~> SalesSource",
+        "SalesSource pivot(groupBy(customer_id),",
+        "\tpivotBy(quarter, ['Q1', 'Q2', 'Q3', 'Q4']),",
+        "\tsum(amount) as amount,",
+        "\tcolumnNaming: '$V$N') ~> PivotByQuarter",
+        "PivotByQuarter sink(allowSchemaDrift: true) ~> PivotSink"
+      ]
+    }
+  }
+}

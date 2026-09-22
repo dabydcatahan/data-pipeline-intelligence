@@ -1,11 +1,8 @@
 """Tests for error analysis (F025)."""
 
-from unittest.mock import patch, MagicMock
-
 import pytest
-
 from app.insights.error_analyzer import analyze_error
-from app.models.error_analysis import ErrorSeverity, AISuggestion
+from app.models.error_analysis import ErrorSeverity
 
 
 def test_analyze_data_type_mismatch():
@@ -42,8 +39,10 @@ def test_analyze_null_constraint():
 
 def test_analyze_join_error():
     """Test detection of join mismatch error."""
-    error_text = "Join condition failed: Left table region_id (varchar) cannot join with " \
-                 "right table region_id (integer). Type mismatch in join keys."
+    error_text = (
+        "Join condition failed: Left table region_id (varchar) cannot join with "
+        "right table region_id (integer). Type mismatch in join keys."
+    )
     result = analyze_error(error_text)
 
     # Should detect as either join or type mismatch (both are valid)
@@ -139,7 +138,8 @@ def test_analyze_path_access_denied():
 
     assert result.inferred_error_type == "path_access_denied"
     assert result.severity == ErrorSeverity.CRITICAL
-    assert "credential" in result.additional_notes.lower() or "permission" in result.additional_notes.lower()
+    notes = result.additional_notes.lower()
+    assert "credential" in notes or "permission" in notes
 
 
 def test_real_production_error():
@@ -147,7 +147,7 @@ def test_real_production_error():
     real_error = (
         "Job failed due to reason: at Sink 'sink1': Operation failed: "
         '"The specified path does not exist.", 404, HEAD, '
-        'https://p08669fdaadlshotaccnp.dfs.core.windows.net/template-reporting-esg/data'
+        "https://p08669fdaadlshotaccnp.dfs.core.windows.net/template-reporting-esg/data"
     )
     result = analyze_error(real_error)
 
@@ -160,90 +160,225 @@ def test_real_production_error():
     assert "path" in result.additional_notes.lower() or "storage" in result.additional_notes.lower()
 
 
-class TestAIIntegration:
-    """Tests for AI-powered error analysis feature."""
+# --------------------------------------------------------------------------------------
+# Real-world error text, collected from Microsoft's official troubleshooting docs
+# (data-flow-troubleshoot-guide, connector-troubleshoot-guide) and verbatim error strings
+# reported on Microsoft Q&A / Stack Overflow. These guard against regressions on the kind
+# of error text a user actually pastes in, not just synthetic test strings.
+REAL_WORLD_ERRORS = [
+    # Copy activity column mapping (Microsoft Q&A / tech-findings.com)
+    (
+        "ErrorCode=UserErrorInvalidColumnMappingColumnNotFound,'Type=Microsoft.DataTransfer."
+        "Common.Shared.HybridDeliveryException,Message=Column 'COUNTDATE' specified in column "
+        "mapping cannot be found in source data.,Source=Microsoft.DataTransfer.ClientLibrary,'",
+        "missing_column",
+    ),
+    # Classic SQL Server sink errors (ADF surfaces the underlying engine text verbatim)
+    ("Invalid column name 'CustomerID'.", "missing_column"),
+    (
+        "Violation of PRIMARY KEY constraint 'PK_Customer'. Cannot insert duplicate key in "
+        "object 'dbo.Customer'. The duplicate key value is (1002).",
+        "duplicate_key_violation",
+    ),
+    (
+        "Cannot insert the value NULL into column 'Email', table 'Staging.dbo.Customer'; "
+        "column does not allow nulls. INSERT fails.",
+        "null_constraint_violation",
+    ),
+    (
+        "String or binary data would be truncated in table 'dbo.Customer', column "
+        "'LastName'. Truncated value: 'Montgomery-Richard'.",
+        "column_length_exceeded",
+    ),
+    (
+        "Conversion failed when converting the varchar value 'N/A' to data type int.",
+        "type_conversion_error",
+    ),
+    (
+        "The INSERT statement conflicted with the FOREIGN KEY constraint "
+        '"FK_Orders_Customer". The conflict occurred in database "Sales", table '
+        "\"dbo.Customer\", column 'CustomerID'.",
+        "foreign_key_violation",
+    ),
+    # Data flow executor errors (Microsoft Learn: data-flow-troubleshoot-guide)
+    ("Column name used in expression is unavailable or invalid.", "missing_column"),
+    ("Converting to a date or time failed due to an invalid character", "type_conversion_error"),
+    ("Field in struct does not exist.", "missing_column"),
+    (
+        "The column in source configuration cannot be found in source data's schema.",
+        "missing_column",
+    ),
+    ("The result has 0 output columns. Ensure at least one column is mapped.", "missing_column"),
+    ("Expression cannot be parsed.", "invalid_expression"),
+    (
+        "Your target table has a column with (n)varchar or (n)varbinary type that has a "
+        "smaller column length limitation than real data, please either adjust the column "
+        "definition in your target table or change the source data.",
+        "column_length_exceeded",
+    ),
+    (
+        "Path does not resolve to any files. Make sure the file/folder exists and is not hidden.",
+        "path_not_found",
+    ),
+    (
+        "System is not able to resolve the IP address of the host. Please verify that your "
+        "host name is correct or check if your DNS server is able to resolve the host to an "
+        "IP address successfully",
+        "connection_failed",
+    ),
+    ("JSON parsing error, unsupported encoding or multiline", "format_error"),
+    # Copy activity / connector general (Microsoft Learn: connector-troubleshoot-guide)
+    (
+        "The underlying connection was closed: An unexpected error occurred on a send.",
+        "connection_failed",
+    ),
+    (
+        "The storage connection string is invalid. Format of the initialization string "
+        "does not conform to specification.",
+        "connection_failed",
+    ),
+    (
+        "Operation on target Copy1 failed: ErrorCode=2200,'Type=Microsoft.DataTransfer."
+        "Common.Shared.HybridDeliveryException,Message=Upload file failed at path "
+        "customer/2026/data.parquet. Error: Forbidden. This request is not authorized to "
+        "perform this operation.",
+        "path_access_denied",
+    ),
+    (
+        "Operation on target Lookup1 failed: The Lookup Activity result is empty. Please "
+        "make sure the query used returns some data.",
+        "lookup_failed",
+    ),
+    # Throttling / resource exhaustion / service limits
+    (
+        "There are substantial concurrent MappingDataflow executions that are causing "
+        "failures due to throttling under Integration Runtime.",
+        "throttling_error",
+    ),
+    (
+        "Cluster ran into out of memory issue during execution, please retry using an "
+        "integration runtime with bigger core count and/or memory optimized compute type",
+        "resource_exhausted",
+    ),
+    (
+        "ForEach activity failed with error: Total entries to process cannot exceed 100,000.",
+        "limit_exceeded",
+    ),
+    # Reported live via the "Flag this error" workflow (session follow-up)
+    ("Table does not exists", "dataset_not_found"),
+    ("Invalid object name 'dbo.Customer'.", "dataset_not_found"),
+]
 
-    def test_analyze_error_without_ai_by_default(self):
-        """Test that AI is not called by default."""
-        error_text = "Column 'customer_id' type mismatch"
+# SQL Server / PostgreSQL / Oracle / MySQL / Parquet / Integration Runtime / missing
+# ADF components / debug session errors, sourced from Microsoft's official
+# troubleshooting docs (self-hosted-integration-runtime-troubleshoot-guide,
+# connector-troubleshoot-parquet) plus well-known verbatim engine error text.
+REAL_WORLD_ERRORS_DATABASES_AND_INFRA = [
+    # SQL Server
+    (
+        "Login failed for user 'intraconnections'. (Microsoft SQL Server, Error: 18456)",
+        "connection_failed",
+    ),
+    (
+        'Cannot open database "Staging" requested by the login. The login failed.',
+        "connection_failed",
+    ),
+    (
+        "A network-related or instance-specific error occurred. SqlErrorNumber=53",
+        "connection_failed",
+    ),
+    ("Incorrect syntax near 'FROM'.", "invalid_expression"),
+    (
+        "Transaction (Process ID 64) was deadlocked on lock resources with another "
+        "process and has been chosen as the deadlock victim.",
+        "transient_db_error",
+    ),
+    (
+        "Timeout expired. The timeout period elapsed prior to completion of the operation.",
+        "transient_db_error",
+    ),
+    # PostgreSQL
+    (
+        'ERROR: duplicate key value violates unique constraint "customer_pkey"',
+        "duplicate_key_violation",
+    ),
+    (
+        'ERROR: null value in column "email" violates not-null constraint',
+        "null_constraint_violation",
+    ),
+    ('ERROR: relation "customer_staging" does not exist', "dataset_not_found"),
+    ('ERROR: column "cust_id" does not exist', "missing_column"),
+    ("ERROR: value too long for type character varying(50)", "column_length_exceeded"),
+    ('FATAL: password authentication failed for user "etl_user"', "connection_failed"),
+    ("could not connect to server: Connection refused", "connection_failed"),
+    ("ERROR: permission denied for table customer", "path_access_denied"),
+    # Oracle
+    ("ORA-00942: table or view does not exist", "dataset_not_found"),
+    ("ORA-01017: invalid username/password; logon denied", "connection_failed"),
+    # MySQL
+    ("Table 'sales.customer_staging' doesn't exist", "dataset_not_found"),
+    ("Access denied for user 'etl'@'10.0.0.5' (using password: YES)", "connection_failed"),
+    # Parquet
+    ("File is not a valid Parquet file.", "format_error"),
+    ("Incorrect format of 'N/A' for converting to Int32.", "type_conversion_error"),
+    (
+        "The data count in a row '12' does not match the column count '10' in given schema.",
+        "schema_mismatch",
+    ),
+    (
+        "Message = Arithmetic Overflow., Source = Microsoft.DataTransfer.Common",
+        "type_conversion_error",
+    ),
+    # Integration Runtime
+    (
+        "The Integration Runtime (Self-hosted) node has encountered an error during "
+        "registration. Cannot connect to the Integration Runtime (Self-hosted) Host "
+        "Service.",
+        "integration_runtime_error",
+    ),
+    ("Authentication Key is not assigned yet", "integration_runtime_error"),
+    ("Self-hosted integration runtime node1 is offline.", "integration_runtime_error"),
+    # Missing ADF components
+    ("Could not find Dataset 'CustomerStaging'.", "component_not_found"),
+    ("Could not find LinkedService 'AzureSqlDb1'.", "component_not_found"),
+    # Debug session
+    ("Spark cluster not found.", "debug_session_error"),
+    ("Debug session has expired. Please restart data flow debug.", "debug_session_error"),
+]
+
+
+@pytest.mark.parametrize("error_text,expected_type", REAL_WORLD_ERRORS)
+def test_real_world_error_is_classified(error_text: str, expected_type: str) -> None:
+    result = analyze_error(error_text)
+    assert result.inferred_error_type == expected_type
+    assert result.severity != ErrorSeverity.INFO
+    assert len(result.lineage_checkpoints) > 0
+    # No entity extraction garbage (e.g. "does"/"with"/"in" mistaken for a column name).
+    stopwords = {"does", "with", "in", "is", "has", "or", "the", "a", "not"}
+    assert all(e.name.lower() not in stopwords for e in result.detected_entities)
+
+
+@pytest.mark.parametrize("error_text,expected_type", REAL_WORLD_ERRORS_DATABASES_AND_INFRA)
+def test_database_and_infra_error_is_classified(error_text: str, expected_type: str) -> None:
+    result = analyze_error(error_text)
+    assert result.inferred_error_type == expected_type
+    assert result.severity != ErrorSeverity.INFO
+    assert len(result.lineage_checkpoints) > 0
+
+
+def test_new_infra_error_types_get_tailored_not_generic_checkpoints():
+    """schema_mismatch/transient_db_error/debug_session_error/integration_runtime_error/
+    component_not_found must not silently fall through to the generic 'trace complete
+    lineage path' checkpoint - tracing column lineage is irrelevant for e.g. an offline
+    Integration Runtime, so a tailored checkpoint is the whole point."""
+    generic = "Trace complete lineage path from source to sink"
+    cases = {
+        "The data count in a row '12' does not match the column count '10' in given schema.",
+        "Transaction (Process ID 64) was deadlocked on lock resources.",
+        "Spark cluster not found.",
+        "The Integration Runtime (Self-hosted) node has encountered an error during registration.",
+        "Could not find Dataset 'CustomerStaging'.",
+    }
+    for error_text in cases:
         result = analyze_error(error_text)
-
-        # Should have deterministic analysis
-        assert result.inferred_error_type == "data_type_mismatch"
-        # Should NOT have AI suggestions by default
-        assert result.ai_suggestions is None
-
-    def test_analyze_error_use_ai_false_explicitly(self):
-        """Test that AI is skipped when use_ai=False."""
-        error_text = "Column 'order_id' not found"
-        result = analyze_error(error_text, use_ai=False)
-
-        assert result.inferred_error_type == "missing_column"
-        assert result.ai_suggestions is None
-
-    @patch("app.insights.gpt4all_provider.analyze_error_with_ai")
-    def test_analyze_error_with_ai_enabled(self, mock_ai: MagicMock) -> None:
-        """Test that AI is called when use_ai=True."""
-        mock_ai.return_value = AISuggestion(
-            root_cause="Type mismatch between columns",
-            diagnosis="The source uses INT but sink expects STRING",
-            fixes=("Add CAST to STRING in derived column",),
-            prevention=("Always validate schema before join",),
-            confidence=0.85,
-        )
-
-        error_text = "Column 'customer_id' type mismatch"
-        result = analyze_error(error_text, use_ai=True)
-
-        # Should have deterministic analysis
-        assert result.inferred_error_type == "data_type_mismatch"
-        # Should have AI suggestions
-        assert result.ai_suggestions is not None
-        assert result.ai_suggestions.root_cause == "Type mismatch between columns"
-        assert result.ai_suggestions.confidence == 0.85
-
-    @patch("app.insights.gpt4all_provider.analyze_error_with_ai")
-    def test_analyze_error_with_ai_graceful_fallback(self, mock_ai: MagicMock) -> None:
-        """Test graceful fallback if AI analysis fails."""
-        mock_ai.side_effect = Exception("Model not available")
-
-        error_text = "Column 'email' not found"
-        result = analyze_error(error_text, use_ai=True)
-
-        # Should still have deterministic analysis even if AI fails
-        assert result.inferred_error_type == "missing_column"
-        # AI suggestions should be None due to error
-        assert result.ai_suggestions is None
-        # Deterministic checkpoints should still be present
-        assert len(result.lineage_checkpoints) > 0
-
-    @patch("app.insights.gpt4all_provider.analyze_error_with_ai")
-    def test_analyze_error_ai_called_with_correct_params(self, mock_ai: MagicMock) -> None:
-        """Test that AI is called with correct parameters."""
-        mock_ai.return_value = AISuggestion(
-            root_cause="Test", diagnosis="Test", fixes=(), prevention=(), confidence=0.5
-        )
-
-        error_text = "Duplicate key in 'user_id'"
-        result = analyze_error(error_text, use_ai=True)
-
-        # Verify AI was called
-        assert mock_ai.called
-        call_args = mock_ai.call_args
-
-        # Check parameters
-        assert call_args.kwargs["error_text"] == error_text
-        assert call_args.kwargs["error_type"] == "duplicate_key_violation"
-        assert "entities" in call_args.kwargs
-        assert isinstance(call_args.kwargs["entities"], tuple)
-
-    def test_analyze_error_deterministic_only_with_import_error(self) -> None:
-        """Test that analyze_error works even if gpt4all is not installed."""
-        error_text = "Column mismatch in 'revenue'"
-        # This should work even though GPT4All may not be installed
-        result = analyze_error(error_text, use_ai=True)
-
-        # Should still get deterministic analysis
-        assert result.inferred_error_type is not None
-        assert len(result.lineage_checkpoints) > 0
-
+        assert result.lineage_checkpoints[0].description != generic, error_text

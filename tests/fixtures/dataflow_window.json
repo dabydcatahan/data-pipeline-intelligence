@@ -1,0 +1,27 @@
+{
+  "name": "CustomerOrderRankFlow",
+  "properties": {
+    "type": "MappingDataFlow",
+    "typeProperties": {
+      "sources": [
+        { "name": "OrdersSource", "dataset": { "referenceName": "OrdersDs", "type": "DatasetReference" } }
+      ],
+      "sinks": [
+        { "name": "RankedOrdersSink", "dataset": { "referenceName": "RankedOrdersDs", "type": "DatasetReference" } }
+      ],
+      "transformations": [
+        { "name": "RankByCustomer" }
+      ],
+      "scriptLines": [
+        "source(output(customer_id as string, order_date as string, amount as double)) ~> OrdersSource",
+        "OrdersSource window(over(customer_id),",
+        "\tasc(order_date, true),",
+        "\twindowColumns(",
+        "\t\trunning_total = sum(amount),",
+        "\t\torder_rank = rank()",
+        "\t)) ~> RankByCustomer",
+        "RankByCustomer sink(allowSchemaDrift: true) ~> RankedOrdersSink"
+      ]
+    }
+  }
+}

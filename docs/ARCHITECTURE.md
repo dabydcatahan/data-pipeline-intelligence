@@ -13,7 +13,7 @@ orientation for new contributors.
 | Parsers | `app.parsers` | **Only** place raw ADF JSON dicts are read; produces models | `app.core`, `app.models` |
 | Lineage | `app.lineage` | `ColumnLineageGraph` (`graph.py`); builders for data flows (`column_lineage.py`), pipelines (`pipeline_lineage.py`) and a stitched cross-artifact graph (`stitch.py`); traversal/`explain` (`traversal.py`); impact scoring (`impact.py`) | models, `parsers.dfs_script`, `parsers.expression_parser`, `parsers.translator` |
 | Documentation | `app.documentation` | Deterministic Markdown from models + lineage (`generator.py`); dependency-free, XSS-safe Markdown→HTML (`export.py`) | models, lineage |
-| Insights | `app.insights` | AI enhancement layer: `sanitize.py` → `InsightRequest` (structural facts only); `DeterministicInsightProvider` (default, offline), `LLMInsightProvider` (optional), `SafeInsightProvider` (fallback); `get_provider(settings)` | models, lineage, summaries (sanitized) |
+| Insights | `app.insights` | AI enhancement layer: `sanitize.py` → `InsightRequest` (structural facts only); `DeterministicInsightProvider` (only provider, offline); `get_provider(settings)` | models, lineage, summaries (sanitized) |
 | Visualization | `app.visualization` | `build_dot` (Graphviz DOT, no dep) + optional `to_pyvis_html` (`viz` extra) rendering of `ColumnLineageGraph` | `lineage`, `models` |
 | Services | `app.services` | Orchestration (`analysis_service.py`) + cross-artifact aggregation (`inventory.py`); the only API the UI calls | everything above |
 | UI | `app.ui` | Streamlit; thin, untyped, widgets → services. Pages: Dashboard, Upload, Pipeline Explorer, Data Flow Explorer, Column Lineage & Impact, Inventory, Documentation, AI Insights | `app.services`, `app.core`, `app.models` (read-only) |
@@ -21,8 +21,10 @@ orientation for new contributors.
 ## Key rules
 
 1. No raw ADF `dict` indexing outside `app.parsers` (DEC-004).
-2. Lineage is deterministic; an LLM never determines lineage (§12).
-3. Uploads are in-memory only; nothing is persisted (DEC-005).
+2. Lineage is deterministic; insights are template-generated, never AI-inferred (§12).
+3. Uploads are in-memory only; nothing is persisted (DEC-005). The one opt-in
+   exception is the Error Analyzer's "Flag this error" capture (DEC-012),
+   disabled unless `AppSettings.error_misses_path` is explicitly configured.
 4. Secret-bearing keys are scrubbed in `app.parsers.base.scrub_secrets`
    before any model is built.
 5. Non-fatal parse problems become `ParseContext` warnings, surfaced per

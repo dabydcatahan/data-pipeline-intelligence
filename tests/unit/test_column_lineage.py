@@ -133,3 +133,51 @@ def test_flatten_folddown_is_decomposed(lineage):
     assert _rel(g, "UserData::orders", "unrollUserData::order_id") is RelationshipType.DERIVED
     assert _rel(g, "UserData::user_id", "unrollUserData::user_id") is RelationshipType.DIRECT
     assert "FlatOrders::order_id" in g.downstream("UserData::orders")
+
+
+def test_window_partition_sort_and_expression_columns_are_linked(lineage):
+    lin = lineage("dataflow_window.json")
+    assert lin.warnings == ()
+    g = lin.graph
+
+    # windowColumns() targets depend on the window expression's own columns...
+    assert _rel(g, "OrdersSource::amount", "RankByCustomer::running_total") is (
+        RelationshipType.WINDOW
+    )
+    # ...and on the over()/asc() partition + sort columns, even for a column
+    # like rank() that references nothing directly.
+    assert _rel(g, "OrdersSource::customer_id", "RankByCustomer::order_rank") is (
+        RelationshipType.WINDOW
+    )
+    assert _rel(g, "OrdersSource::order_date", "RankByCustomer::order_rank") is (
+        RelationshipType.WINDOW
+    )
+    assert g.stream_meta["RankByCustomer"]["window_partition_by"] == ("customer_id",)
+    assert g.stream_meta["RankByCustomer"]["window_order_by"] == ("order_date",)
+
+    # Existing columns not produced by windowColumns() still pass through.
+    assert g.edge("OrdersSource::customer_id", "RankByCustomer::customer_id").passthrough is True
+    assert "RankedOrdersSink::running_total" in g.downstream("OrdersSource::amount")
+
+
+def test_pivot_groupby_is_direct_and_values_approximated(lineage):
+    lin = lineage("dataflow_pivot.json")
+    g = lin.graph
+
+    assert _rel(g, "SalesSource::customer_id", "PivotByQuarter::customer_id") is (
+        RelationshipType.DIRECT
+    )
+    # Literal pivotBy() values let us approximate the output column names.
+    for quarter in ("Q1", "Q2", "Q3", "Q4"):
+        assert _rel(g, "SalesSource::amount", f"PivotByQuarter::amount_{quarter}") is (
+            RelationshipType.AGGREGATE
+        )
+        assert _rel(g, "SalesSource::quarter", f"PivotByQuarter::amount_{quarter}") is (
+            RelationshipType.AGGREGATE
+        )
+    assert any("approximated" in w for w in lin.warnings)
+
+    # A pivot must NOT claim unrelated columns pass through unchanged: "quarter"
+    # (the pivot key itself) is consumed, not carried through as its own output.
+    produced = {g.node(n).column for n in g.node_ids() if n.startswith("PivotByQuarter::")}
+    assert produced == {"customer_id", "amount_Q1", "amount_Q2", "amount_Q3", "amount_Q4"}

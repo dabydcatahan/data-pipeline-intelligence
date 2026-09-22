@@ -73,6 +73,36 @@ def test_upload_page_can_remove_and_clear_artifacts():
     assert at.session_state["session"].artifacts == []
 
 
+def test_error_analyzer_shows_real_column_lineage_for_a_loaded_data_flow():
+    at = AppTest.from_file(APP, default_timeout=30)
+    at.run()
+    from app.services.analysis_service import AnalysisService
+
+    svc = AnalysisService()
+    at.session_state["session"].add(
+        svc.analyze_upload(
+            "dataflow_customer_full.json",
+            (FIXTURES / "dataflow_customer_full.json").read_bytes(),
+        )
+    )
+
+    at.sidebar.radio[0].set_value("Error Analyzer").run()
+    at.text_area(key="error_analyzer_paste_input").set_value(
+        "Column 'customer_id' not found in source"
+    ).run()
+    next(b for b in at.button if b.label == "Analyze error").click().run()
+
+    assert not at.exception
+    _error_text, analysis = at.session_state["error_analyzer_result"]
+    assert analysis.inferred_error_type == "missing_column"
+    # The backend found a real match in the uploaded data flow, not just a
+    # generic recommendation - and the UI must actually render it.
+    assert len(analysis.suggested_lineage) > 0
+    body = "\n".join(str(v) for e in at.get("markdown") for v in [e.value])
+    assert "Column Lineage" in body
+    assert "customer_id" in body
+
+
 def test_inventory_page_lists_artifacts():
     at = AppTest.from_file(APP, default_timeout=30)
     at.run()
