@@ -1,0 +1,22 @@
+{
+  "name": "ExoticFlow",
+  "properties": {
+    "type": "MappingDataFlow",
+    "typeProperties": {
+      "sources": [
+        { "name": "Src", "dataset": { "referenceName": "SrcDs", "type": "DatasetReference" } }
+      ],
+      "sinks": [
+        { "name": "Snk", "dataset": { "referenceName": "SnkDs", "type": "DatasetReference" } }
+      ],
+      "transformations": [
+        { "name": "DoMagic" }
+      ],
+      "scriptLines": [
+        "source(output(a as string)) ~> Src",
+        "Src superNovaTransform(mode: 'quantum') ~> DoMagic",
+        "DoMagic sink(allowSchemaDrift: true) ~> Snk"
+      ]
+    }
+  }
+}

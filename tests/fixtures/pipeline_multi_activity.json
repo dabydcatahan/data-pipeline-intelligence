@@ -1,0 +1,50 @@
+{
+  "name": "CustomerLoad",
+  "properties": {
+    "description": "Ingest, transform and publish customer data.",
+    "folder": { "name": "Customer" },
+    "concurrency": 2,
+    "parameters": {
+      "runDate": { "type": "String", "defaultValue": "2026-01-01" },
+      "batchSize": { "type": "Int", "defaultValue": 1000 }
+    },
+    "variables": {
+      "rowCount": { "type": "Integer" }
+    },
+    "activities": [
+      {
+        "name": "CopyRaw",
+        "type": "Copy",
+        "typeProperties": {
+          "source": { "type": "JsonSource" },
+          "sink": {
+            "type": "ParquetSink",
+            "connectionString": "Server=should-be-redacted;Password=secret"
+          }
+        },
+        "inputs": [{ "referenceName": "RawCustomer", "type": "DatasetReference" }],
+        "outputs": [{ "referenceName": "StageCustomer", "type": "DatasetReference" }]
+      },
+      {
+        "name": "TransformCustomer",
+        "type": "ExecuteDataFlow",
+        "dependsOn": [
+          { "activity": "CopyRaw", "dependencyConditions": ["Succeeded"] }
+        ],
+        "typeProperties": {
+          "dataflow": { "referenceName": "CustomerDataFlow", "type": "DataFlowReference" }
+        }
+      },
+      {
+        "name": "RefreshStats",
+        "type": "SqlServerStoredProcedure",
+        "dependsOn": [
+          { "activity": "TransformCustomer", "dependencyConditions": ["Succeeded"] }
+        ],
+        "typeProperties": {
+          "storedProcedureName": "dbo.RefreshCustomerStats"
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "name": "UserOrderFlatten",
+  "properties": {
+    "type": "MappingDataFlow",
+    "description": "Flatten a nested orders array with foldDown / unroll.",
+    "typeProperties": {
+      "sources": [
+        { "name": "UserData", "dataset": { "referenceName": "RawUsers", "type": "DatasetReference" } }
+      ],
+      "sinks": [
+        { "name": "FlatOrders", "dataset": { "referenceName": "UserOrders", "type": "DatasetReference" } }
+      ],
+      "transformations": [
+        { "name": "unrollUserData" }
+      ],
+      "scriptLines": [
+        "source(output(user_id as string, orders as string[]),",
+        "\tallowSchemaDrift: true) ~> UserData",
+        "UserData foldDown(unroll(orders),",
+        "\tmapColumn(",
+        "\t\tuser_id,",
+        "\t\torder_id = orders.order_id,",
+        "\t\torder_total = orders.total",
+        "\t),",
+        "\tskipDuplicateMapInputs: false,",
+        "\tskipDuplicateMapOutputs: false) ~> unrollUserData",
+        "unrollUserData sink(allowSchemaDrift: true) ~> FlatOrders"
+      ]
+    }
+  }
+}

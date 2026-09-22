@@ -1,0 +1,9 @@
+{
+  "name": "SomeLinkedService",
+  "properties": {
+    "type": "AzureBlobStorage",
+    "typeProperties": {
+      "serviceEndpoint": "https://example.blob.core.windows.net"
+    }
+  }
+}

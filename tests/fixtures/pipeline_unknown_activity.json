@@ -1,0 +1,20 @@
+{
+  "name": "ExoticPipeline",
+  "properties": {
+    "activities": [
+      {
+        "name": "DoSomethingExotic",
+        "type": "SuperNewActivityTypeV3",
+        "typeProperties": { "magic": true }
+      },
+      {
+        "name": "CopyAfter",
+        "type": "Copy",
+        "dependsOn": [{ "activity": "DoSomethingExotic", "dependencyConditions": ["Completed"] }],
+        "inputs": [{ "referenceName": "SrcDs", "type": "DatasetReference" }],
+        "outputs": [{ "referenceName": "DstDs", "type": "DatasetReference" }],
+        "typeProperties": {}
+      }
+    ]
+  }
+}

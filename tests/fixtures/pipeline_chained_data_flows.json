@@ -1,0 +1,35 @@
+{
+  "name": "CustomerPublishPipeline",
+  "properties": {
+    "description": "Runs two chained ExecuteDataFlow activities: enrich then publish.",
+    "activities": [
+      {
+        "name": "RunEnrichFlow",
+        "type": "ExecuteDataFlow",
+        "typeProperties": {
+          "dataflow": { "referenceName": "CustomerEnrichFlow", "type": "DataFlowReference" }
+        }
+      },
+      {
+        "name": "NotifyStart",
+        "type": "SqlServerStoredProcedure",
+        "dependsOn": [
+          { "activity": "RunEnrichFlow", "dependencyConditions": ["Succeeded"] }
+        ],
+        "typeProperties": {
+          "storedProcedureName": "dbo.LogEnrichComplete"
+        }
+      },
+      {
+        "name": "RunPublishFlow",
+        "type": "ExecuteDataFlow",
+        "dependsOn": [
+          { "activity": "NotifyStart", "dependencyConditions": ["Succeeded"] }
+        ],
+        "typeProperties": {
+          "dataflow": { "referenceName": "PublishCustomerFlow", "type": "DataFlowReference" }
+        }
+      }
+    ]
+  }
+}

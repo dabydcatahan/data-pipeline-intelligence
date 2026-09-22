@@ -1,0 +1,24 @@
+{
+  "name": "CustomerDataFlow",
+  "properties": {
+    "type": "MappingDataFlow",
+    "description": "Select and rename customer columns.",
+    "typeProperties": {
+      "sources": [
+        { "name": "CustomerSource", "dataset": { "referenceName": "StageCustomer", "type": "DatasetReference" } }
+      ],
+      "sinks": [
+        { "name": "CustomerSink", "dataset": { "referenceName": "DimCustomer", "type": "DatasetReference" } }
+      ],
+      "transformations": [
+        { "name": "SelectCustomerColumns" }
+      ],
+      "scriptLines": [
+        "source(output(customer_id as string, first_name as string, last_name as string),",
+        "  allowSchemaDrift: true) ~> CustomerSource",
+        "CustomerSource select(mapColumn(customer_id, first_name, last_name)) ~> SelectCustomerColumns",
+        "SelectCustomerColumns sink(allowSchemaDrift: true) ~> CustomerSink"
+      ]
+    }
+  }
+}

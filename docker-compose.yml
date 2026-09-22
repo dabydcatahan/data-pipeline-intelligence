@@ -1,0 +1,14 @@
+services:
+  app:
+    build: .
+    image: data-pipeline-intelligence:latest
+    ports:
+      - "8501:8501"
+    environment:
+      # All optional; safe defaults apply. See .env.example.
+      ADFPI_LOG_LEVEL: INFO
+      ADFPI_LOG_FORMAT: text
+      ADFPI_MAX_UPLOAD_BYTES: "5242880"
+      ADFPI_ENABLE_LLM_INSIGHTS: "false"
+    # No volumes: uploaded ADF definitions are processed in memory and never persisted.
+    restart: unless-stopped

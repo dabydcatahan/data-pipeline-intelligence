@@ -1,0 +1,51 @@
+{
+  "name": "CustomerEnrichFlow",
+  "properties": {
+    "type": "MappingDataFlow",
+    "description": "Enrich and conform customer records.",
+    "typeProperties": {
+      "sources": [
+        { "name": "CustomerSource", "dataset": { "referenceName": "StageCustomer", "type": "DatasetReference" } },
+        { "name": "RegionRef", "dataset": { "referenceName": "RegionLookup", "type": "DatasetReference" } }
+      ],
+      "sinks": [
+        { "name": "CustomerSink", "dataset": { "referenceName": "DimCustomer", "type": "DatasetReference" } }
+      ],
+      "transformations": [
+        { "name": "DeriveCustomerKey" },
+        { "name": "RenameColumns" },
+        { "name": "JoinRegion" },
+        { "name": "FilterActive" }
+      ],
+      "scriptLines": [
+        "source(output(",
+        "\t\tcustomer_id as string,",
+        "\t\tfirst_name as string,",
+        "\t\tlast_name as string,",
+        "\t\tregion_code as string,",
+        "\t\tstatus as string",
+        "\t),",
+        "\tallowSchemaDrift: true,",
+        "\tvalidateSchema: false) ~> CustomerSource",
+        "source(output(",
+        "\t\tregion_code as string,",
+        "\t\tregion_name as string",
+        "\t),",
+        "\tallowSchemaDrift: true) ~> RegionRef",
+        "CustomerSource derive(customer_key = concat('CUST-', toString(customer_id)),",
+        "\t\tfull_name = concat(first_name, ' ', last_name)) ~> DeriveCustomerKey",
+        "DeriveCustomerKey select(mapColumn(",
+        "\t\tcustomer_id,",
+        "\t\tcust_key = customer_key,",
+        "\t\tfull_name,",
+        "\t\tregion_code,",
+        "\t\tstatus)) ~> RenameColumns",
+        "RenameColumns, RegionRef join(RenameColumns@region_code == RegionRef@region_code,",
+        "\tjoinType:'left',",
+        "\tbroadcast: 'auto') ~> JoinRegion",
+        "JoinRegion filter(status == 'ACTIVE') ~> FilterActive",
+        "FilterActive sink(allowSchemaDrift: true) ~> CustomerSink"
+      ]
+    }
+  }
+}

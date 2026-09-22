@@ -1,0 +1,22 @@
+{
+  "name": "[concat(parameters('factoryName'), '/OrdersPipeline')]",
+  "type": "Microsoft.DataFactory/factories/pipelines",
+  "apiVersion": "2018-06-01",
+  "properties": {
+    "activities": [
+      {
+        "name": "WaitABit",
+        "type": "Wait",
+        "typeProperties": { "waitTimeInSeconds": 5 }
+      },
+      {
+        "name": "CopyOrders",
+        "type": "Copy",
+        "dependsOn": [{ "activity": "WaitABit", "dependencyConditions": ["Succeeded"] }],
+        "inputs": [{ "referenceName": "OrdersSource", "type": "DatasetReference" }],
+        "outputs": [{ "referenceName": "OrdersSink", "type": "DatasetReference" }],
+        "typeProperties": {}
+      }
+    ]
+  }
+}

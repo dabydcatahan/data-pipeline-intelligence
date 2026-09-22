@@ -1,0 +1,23 @@
+{
+  "name": "CopyCustomerPipeline",
+  "properties": {
+    "description": "Copies customer rows from source to sink.",
+    "activities": [
+      {
+        "name": "CopyCustomer",
+        "type": "Copy",
+        "typeProperties": {
+          "source": { "type": "DelimitedTextSource" },
+          "sink": { "type": "AzureSqlSink" }
+        },
+        "inputs": [
+          { "referenceName": "CustomerSource", "type": "DatasetReference" }
+        ],
+        "outputs": [
+          { "referenceName": "CustomerSink", "type": "DatasetReference" }
+        ]
+      }
+    ],
+    "annotations": ["customer", "bronze"]
+  }
+}

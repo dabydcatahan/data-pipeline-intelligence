@@ -1,0 +1,19 @@
+{
+  "name": "CyclicPipeline",
+  "properties": {
+    "activities": [
+      {
+        "name": "A",
+        "type": "Wait",
+        "dependsOn": [{ "activity": "B", "dependencyConditions": ["Succeeded"] }],
+        "typeProperties": { "waitTimeInSeconds": 1 }
+      },
+      {
+        "name": "B",
+        "type": "Wait",
+        "dependsOn": [{ "activity": "A", "dependencyConditions": ["Succeeded"] }],
+        "typeProperties": { "waitTimeInSeconds": 1 }
+      }
+    ]
+  }
+}

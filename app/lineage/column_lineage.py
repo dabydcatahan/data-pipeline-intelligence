@@ -1,0 +1,609 @@
+"""Deterministic column-lineage construction for a Mapping Data Flow (F009).
+
+Walks the data flow's streams in topological order, tracking each stream's output
+schema, and emits typed dependency edges into a :class:`ColumnLineageGraph`.
+
+Per-operator rules (T009.3 - T009.9):
+
+======================  ==================================================================
+operator                behaviour
+======================  ==================================================================
+source                  seed schema from ``output(...)``; emit ``SOURCE_COLUMN`` nodes
+select                  output schema = mapColumn targets; retained -> DIRECT,
+                        ``new = old`` -> RENAME, ``new = expr`` -> DERIVED
+derive                  keep every input column (PASSTHROUGH) + add derived targets
+                        (DERIVED, deps from the expression parser)
+filter                  passthrough all columns; record participating columns as FILTER
+join / lookup           passthrough all input columns; parse the condition into
+                        ``stream@col`` keys -> JOIN_KEY / LOOKUP edges
+aggregate               output schema = groupBy keys (DIRECT) + aggregate targets
+                        (AGGREGATE); non-key input columns are dropped
+union                   output schema = union of input schemas by name; UNION edges
+split                   passthrough to the base node and to every branch stream;
+                        record condition columns as CONDITIONAL_SPLIT
+other / unknown          passthrough all input columns (approximate) + a warning
+sink                    output schema = feeding stream's schema; DIRECT edges
+======================  ==================================================================
+"""
+
+from __future__ import annotations
+
+import re
+from collections import deque
+from collections.abc import Iterable
+from dataclasses import dataclass
+
+from app.core.logging import get_logger
+from app.lineage.graph import ColumnLineageGraph
+from app.models.dataflow import DataFlow, DataFlowTransformation
+from app.models.lineage import NodeKind, RelationshipType, StreamKind
+from app.parsers.dfs_script import _split_first_assignment, _strip_call, split_top_level
+from app.parsers.expression_parser import analyze_expression
+
+logger = get_logger(__name__)
+
+_JOIN_LIKE = {"join", "lookup", "exists"}
+_PASSTHROUGH_OPERATORS = {"sort", "alterRow", "rank", "cast", "assert", "dedupe", "sample"}
+
+#: `each(match(<cond>), ...)` conditions we treat as "matches every remaining column".
+_ALWAYS_TRUE = {"true()", "true", "1==1", "1 == 1"}
+_RULE_PREFIX_RE = re.compile(r"^'([^']*)'\s*\+\s*\$\$$")
+_RULE_SUFFIX_RE = re.compile(r"^\$\$\s*\+\s*'([^']*)'$")
+
+
+def _select_rules(raw_arguments: str) -> list[tuple[str, str, str]]:
+    """Parse `each(match(<cond>), <lhs> = <rhs>)` rules from a select's arguments."""
+    rules: list[tuple[str, str, str]] = []
+    for part in split_top_level(raw_arguments):
+        inside = _strip_call(part, "each")
+        if inside is None:
+            continue
+        items = split_top_level(inside)
+        condition = ""
+        if items and items[0].lstrip().startswith("match"):
+            cond = _strip_call(items[0], "match")
+            condition = (cond if cond is not None else items[0]).strip()
+            items = items[1:]
+        for item in items:
+            assignment = _split_first_assignment(item)
+            if assignment:
+                rules.append((condition, assignment[0].strip(), assignment[1].strip()))
+    return rules
+
+
+def _resolve_rule_name(lhs: str, column: str) -> str | None:
+    """Resolve a rule target expression (`$$`, `'p_' + $$`, `$$ + '_x'`) for one column."""
+    if lhs == "$$":
+        return column
+    prefix = _RULE_PREFIX_RE.match(lhs)
+    if prefix:
+        return prefix.group(1) + column
+    suffix = _RULE_SUFFIX_RE.match(lhs)
+    if suffix:
+        return column + suffix.group(1)
+    return None
+
+
+#: A DFS option argument such as ``disjoint: false`` or ``joinType: 'inner'``.
+_OPTION_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\s*:")
+
+
+@dataclass(frozen=True)
+class DataFlowLineage:
+    """A built column-lineage graph plus the warnings raised while building it.
+
+    Also used for pipeline and combined (stitched) lineage - ``kind`` says which.
+    ``bindings`` lists ``(stream, dataset, role)`` tuples used by the stitcher
+    (``role`` is ``"reader"`` or ``"writer"``); empty for a plain data flow.
+    """
+
+    data_flow: str
+    graph: ColumnLineageGraph
+    warnings: tuple[str, ...]
+    kind: str = "data_flow"
+    bindings: tuple[tuple[str, str, str], ...] = ()
+
+
+class _Builder:
+    def __init__(self, df: DataFlow) -> None:
+        self.df = df
+        self.graph = ColumnLineageGraph(df.name)
+        self.schema: dict[str, list[str]] = {}
+        self.warnings: list[str] = []
+        self._branches: dict[str, tuple[str, ...]] = {
+            st.output_stream: st.output_branches for st in df.statements if st.output_branches
+        }
+
+    # -------------------------------------------------------------- helpers
+    def warn(self, message: str) -> None:
+        self.warnings.append(message)
+
+    def _input_schema(self, stream: str) -> list[str]:
+        if stream not in self.schema:
+            self.warn(
+                f"Data flow '{self.df.name}': stream '{stream}' is consumed before it is "
+                "defined; treating its schema as empty."
+            )
+            return []
+        return self.schema[stream]
+
+    def _locate(self, column: str, inputs: list[str]) -> list[str]:
+        """Return the input streams (in order) whose schema contains ``column``."""
+        return [s for s in inputs if column in self.schema.get(s, [])]
+
+    def _add_output(self, stream: str, column: str) -> None:
+        self.graph.add_column(stream, column, NodeKind.OUTPUT_COLUMN)
+
+    # -------------------------------------------------------------- ordering
+    def _ordered_streams(self) -> list[str]:
+        universe: dict[str, None] = {}
+        for src in self.df.sources:
+            universe.setdefault(src.name, None)
+        for tr in self.df.transformations:
+            universe.setdefault(tr.name, None)
+            for branch in self._branches.get(tr.name, ()):
+                universe.setdefault(branch, None)
+        for sink in self.df.sinks:
+            universe.setdefault(sink.name, None)
+
+        indegree = dict.fromkeys(universe, 0)
+        adjacency: dict[str, list[str]] = {name: [] for name in universe}
+        for upstream, downstream in self.df.stream_edges():
+            if upstream in universe and downstream in universe:
+                adjacency[upstream].append(downstream)
+                indegree[downstream] += 1
+
+        queue = deque(name for name in universe if indegree[name] == 0)
+        ordered: list[str] = []
+        while queue:
+            node = queue.popleft()
+            ordered.append(node)
+            for nxt in adjacency[node]:
+                indegree[nxt] -= 1
+                if indegree[nxt] == 0:
+                    queue.append(nxt)
+        leftover = [name for name in universe if name not in ordered]
+        if leftover:
+            self.warn(
+                f"Data flow '{self.df.name}': stream dependency cycle among "
+                + ", ".join(sorted(leftover))
+            )
+            ordered.extend(leftover)
+        return ordered
+
+    # -------------------------------------------------------------- build
+    def build(self) -> DataFlowLineage:
+        sources = {s.name: s for s in self.df.sources}
+        transformations = {t.name: t for t in self.df.transformations}
+        sinks = {s.name: s for s in self.df.sinks}
+        branch_parents = {
+            branch: parent for parent, branches in self._branches.items() for branch in branches
+        }
+
+        for stream in self._ordered_streams():
+            if stream in sources:
+                self._build_source(stream)
+            elif stream in transformations:
+                self._build_transformation(transformations[stream])
+            elif stream in branch_parents:
+                self._build_branch(stream, branch_parents[stream])
+            elif stream in sinks:
+                self._build_sink(stream)
+
+        return DataFlowLineage(
+            data_flow=self.df.name,
+            graph=self.graph,
+            warnings=tuple(self.warnings),
+        )
+
+    def _build_source(self, name: str) -> None:
+        source = next(s for s in self.df.sources if s.name == name)
+        columns = list(source.schema_columns)
+        self.graph.register_stream(name, StreamKind.SOURCE.value)
+        for column in columns:
+            self.graph.add_column(name, column, NodeKind.SOURCE_COLUMN)
+        self.schema[name] = columns
+        if not columns:
+            self.warn(
+                f"Data flow '{self.df.name}': source '{name}' has no declared schema "
+                "(schema drift); lineage originating here is incomplete."
+            )
+
+    def _build_sink(self, name: str) -> None:
+        sink = next(s for s in self.df.sinks if s.name == name)
+        self.graph.register_stream(name, StreamKind.SINK.value)
+        feeding = sink.input_stream
+        if feeding is None:
+            self.warn(f"Data flow '{self.df.name}': sink '{name}' has no input stream.")
+            self.schema[name] = []
+            return
+        columns = self._input_schema(feeding)
+        for column in columns:
+            self.graph.add_column(name, column, NodeKind.SINK_COLUMN)
+            self.graph.add_dependency(
+                feeding,
+                column,
+                name,
+                column,
+                relationship=RelationshipType.DIRECT,
+                transformation=name,
+                transformation_type="sink",
+            )
+        self.schema[name] = list(columns)
+
+    def _build_branch(self, branch: str, parent: str) -> None:
+        parent_tr = next((t for t in self.df.transformations if t.name == parent), None)
+        inputs = list(parent_tr.input_streams) if parent_tr else []
+        cols = _dedup(col for stream in inputs for col in self.schema.get(stream, []))
+        self.graph.register_stream(branch, StreamKind.TRANSFORMATION.value, split_branch_of=parent)
+        for column in cols:
+            self._add_output(branch, column)
+            for src in self._locate(column, inputs):
+                self.graph.add_dependency(
+                    src,
+                    column,
+                    branch,
+                    column,
+                    relationship=RelationshipType.CONDITIONAL_SPLIT,
+                    transformation=branch,
+                    transformation_type="split",
+                    passthrough=True,
+                )
+        self.schema[branch] = cols
+
+    # ----------------------------------------------------- transformation
+    def _build_transformation(self, tr: DataFlowTransformation) -> None:
+        op = tr.kind or "unknown"
+        inputs = list(tr.input_streams)
+        self.graph.register_stream(tr.name, StreamKind.TRANSFORMATION.value, operator=op)
+        if not inputs:
+            self.warn(
+                f"Data flow '{self.df.name}': transformation '{tr.name}' ({op}) has no "
+                "input stream; skipped."
+            )
+            self.schema[tr.name] = []
+            return
+
+        handler = {
+            "select": self._op_select,
+            "foldDown": self._op_select,  # Flatten: mapColumn(...) like a select
+            "derive": self._op_derive,
+            "filter": self._op_filter,
+            "aggregate": self._op_aggregate,
+            "union": self._op_union,
+            "split": self._op_split,
+        }.get(op)
+        if handler is not None:
+            handler(tr, inputs)
+        elif op in _JOIN_LIKE:
+            self._op_join_like(tr, inputs)
+        else:
+            self._op_passthrough(tr, inputs, note=op not in _PASSTHROUGH_OPERATORS)
+
+    def _passthrough(
+        self,
+        tr: DataFlowTransformation,
+        inputs: list[str],
+        *,
+        relationship: RelationshipType = RelationshipType.PASSTHROUGH,
+        skip: set[str] | None = None,
+    ) -> list[str]:
+        skip = skip or set()
+        produced = _dedup(col for stream in inputs for col in self.schema.get(stream, []))
+        for column in produced:
+            if column in skip:
+                continue
+            self._add_output(tr.name, column)
+            for src in self._locate(column, inputs):
+                self.graph.add_dependency(
+                    src,
+                    column,
+                    tr.name,
+                    column,
+                    relationship=relationship,
+                    transformation=tr.name,
+                    transformation_type=tr.kind,
+                    passthrough=True,
+                )
+        return produced
+
+    def _op_passthrough(self, tr: DataFlowTransformation, inputs: list[str], *, note: bool) -> None:
+        produced = self._passthrough(tr, inputs)
+        self.schema[tr.name] = produced
+        if note:
+            self.warn(
+                f"Data flow '{self.df.name}': lineage through '{tr.name}' "
+                f"({tr.kind or 'unknown'}) is approximate - columns are assumed to pass "
+                "through unchanged."
+            )
+
+    def _op_select(self, tr: DataFlowTransformation, inputs: list[str]) -> None:
+        produced: list[str] = []
+        consumed: set[str] = set()
+        for col in tr.columns:
+            produced.append(col.target)
+            consumed.add(col.target)
+            consumed.update(col.referenced_columns)
+            self._add_output(tr.name, col.target)
+            relationship = {
+                "retained": RelationshipType.DIRECT,
+                "renamed": RelationshipType.RENAME,
+                "derived": RelationshipType.DERIVED,
+            }.get(col.kind, RelationshipType.DIRECT)
+            self._link_expression_deps(
+                tr,
+                inputs,
+                col.target,
+                col.referenced_columns,
+                relationship,
+                col.expression,
+                col.analysis_confidence,
+            )
+
+        produced.extend(self._apply_select_rules(tr, inputs, consumed))
+
+        if not produced:
+            # A select / Flatten that auto-maps (no explicit mapColumn, no rules).
+            self.schema[tr.name] = self._passthrough(tr, inputs)
+            return
+        self.schema[tr.name] = _dedup(produced)
+
+    def _apply_select_rules(
+        self, tr: DataFlowTransformation, inputs: list[str], consumed: set[str]
+    ) -> list[str]:
+        """Handle `each(match(...), $$ = $$)` rule-based (pattern) column mapping."""
+        rules = _select_rules(tr.raw_arguments)
+        if not rules:
+            return []
+        input_cols = _dedup(col for stream in inputs for col in self.schema.get(stream, []))
+        remaining = [c for c in input_cols if c not in consumed]
+        produced: list[str] = []
+        unresolved = False
+        for condition, lhs, rhs in rules:
+            if condition and condition not in _ALWAYS_TRUE:
+                self.warn(
+                    f"Data flow '{self.df.name}': select '{tr.name}' rule "
+                    f"match({condition}) is not evaluated; remaining columns are assumed "
+                    "to match it."
+                )
+            rel = (
+                RelationshipType.DIRECT
+                if rhs == "$$" and lhs == "$$"
+                else RelationshipType.RENAME
+                if rhs == "$$"
+                else RelationshipType.DERIVED
+            )
+            for column in remaining:
+                target = _resolve_rule_name(lhs, column)
+                if target is None:
+                    unresolved = True
+                    continue
+                self._add_output(tr.name, target)
+                for src in self._locate(column, inputs):
+                    self.graph.add_dependency(
+                        src,
+                        column,
+                        tr.name,
+                        target,
+                        relationship=rel,
+                        transformation=tr.name,
+                        transformation_type="select",
+                    )
+                produced.append(target)
+        if unresolved:
+            self.warn(
+                f"Data flow '{self.df.name}': select '{tr.name}' has a rule-based output "
+                "name this tool cannot resolve; those columns are omitted from lineage."
+            )
+        return produced
+
+    def _op_derive(self, tr: DataFlowTransformation, inputs: list[str]) -> None:
+        targets = {c.target for c in tr.columns}
+        carried = self._passthrough(tr, inputs, skip=targets)
+        for col in tr.columns:
+            self._add_output(tr.name, col.target)
+            self._link_expression_deps(
+                tr,
+                inputs,
+                col.target,
+                col.referenced_columns,
+                RelationshipType.DERIVED,
+                col.expression,
+                col.analysis_confidence,
+            )
+        self.schema[tr.name] = _dedup([*carried, *(c.target for c in tr.columns)])
+
+    def _op_filter(self, tr: DataFlowTransformation, inputs: list[str]) -> None:
+        produced = self._passthrough(tr, inputs)
+        analysis = analyze_expression(tr.raw_arguments)
+        self.graph.register_stream(
+            tr.name,
+            StreamKind.TRANSFORMATION.value,
+            operator="filter",
+            filter_expression=tr.raw_arguments,
+            filter_columns=tuple(analysis.referenced_columns),
+        )
+        for column in analysis.referenced_columns:
+            for src in self._locate(column, inputs):
+                self.graph.add_dependency(
+                    src,
+                    column,
+                    tr.name,
+                    column,
+                    relationship=RelationshipType.FILTER,
+                    transformation=tr.name,
+                    transformation_type="filter",
+                    expression=tr.raw_arguments,
+                )
+        self.schema[tr.name] = produced
+
+    def _op_aggregate(self, tr: DataFlowTransformation, inputs: list[str]) -> None:
+        produced: list[str] = []
+        for key in tr.group_by:
+            produced.append(key)
+            self._add_output(tr.name, key)
+            for src in self._locate(key, inputs):
+                self.graph.add_dependency(
+                    src,
+                    key,
+                    tr.name,
+                    key,
+                    relationship=RelationshipType.DIRECT,
+                    transformation=tr.name,
+                    transformation_type="aggregate",
+                )
+            if not self._locate(key, inputs):
+                self.warn(
+                    f"Data flow '{self.df.name}': aggregate '{tr.name}' groups by unknown "
+                    f"column '{key}'."
+                )
+        for col in tr.columns:
+            produced.append(col.target)
+            self._add_output(tr.name, col.target)
+            self._link_expression_deps(
+                tr,
+                inputs,
+                col.target,
+                col.referenced_columns,
+                RelationshipType.AGGREGATE,
+                col.expression,
+                col.analysis_confidence,
+            )
+        self.schema[tr.name] = _dedup(produced)
+
+    def _op_union(self, tr: DataFlowTransformation, inputs: list[str]) -> None:
+        produced = _dedup(col for stream in inputs for col in self.schema.get(stream, []))
+        for column in produced:
+            self._add_output(tr.name, column)
+            for src in self._locate(column, inputs):
+                self.graph.add_dependency(
+                    src,
+                    column,
+                    tr.name,
+                    column,
+                    relationship=RelationshipType.UNION,
+                    transformation=tr.name,
+                    transformation_type="union",
+                )
+        self.schema[tr.name] = produced
+
+    def _op_split(self, tr: DataFlowTransformation, inputs: list[str]) -> None:
+        produced = self._passthrough(tr, inputs, relationship=RelationshipType.CONDITIONAL_SPLIT)
+        conditions = [
+            part for part in split_top_level(tr.raw_arguments) if not _OPTION_RE.match(part)
+        ]
+        condition_columns: list[str] = []
+        for condition in conditions:
+            analysis = analyze_expression(condition)
+            for column in analysis.referenced_columns:
+                condition_columns.append(column)
+                for src in self._locate(column, inputs):
+                    self.graph.add_dependency(
+                        src,
+                        column,
+                        tr.name,
+                        column,
+                        relationship=RelationshipType.CONDITIONAL_SPLIT,
+                        transformation=tr.name,
+                        transformation_type="split",
+                        expression=condition,
+                    )
+        self.graph.register_stream(
+            tr.name,
+            StreamKind.TRANSFORMATION.value,
+            operator="split",
+            split_conditions=tuple(conditions),
+            split_columns=tuple(_dedup(condition_columns)),
+        )
+        self.schema[tr.name] = produced
+
+    def _op_join_like(self, tr: DataFlowTransformation, inputs: list[str]) -> None:
+        produced = self._passthrough(tr, inputs)
+        condition = split_top_level(tr.raw_arguments)[:1]
+        analysis = analyze_expression(condition[0]) if condition else analyze_expression("")
+        relationship = RelationshipType.LOOKUP if tr.kind == "lookup" else RelationshipType.JOIN_KEY
+        self.graph.register_stream(
+            tr.name,
+            StreamKind.TRANSFORMATION.value,
+            operator=tr.kind,
+            join_condition=condition[0] if condition else "",
+            join_key_columns=tuple(analysis.referenced_columns),
+        )
+        for qualified in analysis.qualified_columns:
+            stream, _, column = qualified.partition("@")
+            if column in self.schema.get(stream, []):
+                self.graph.add_dependency(
+                    stream,
+                    column,
+                    tr.name,
+                    column,
+                    relationship=relationship,
+                    transformation=tr.name,
+                    transformation_type=tr.kind,
+                    expression=condition[0] if condition else None,
+                )
+        # Fallback when the condition used bare (unqualified) column names.
+        if not analysis.qualified_columns:
+            for column in analysis.referenced_columns:
+                for src in self._locate(column, inputs):
+                    self.graph.add_dependency(
+                        src,
+                        column,
+                        tr.name,
+                        column,
+                        relationship=relationship,
+                        transformation=tr.name,
+                        transformation_type=tr.kind,
+                        expression=condition[0] if condition else None,
+                    )
+        self.schema[tr.name] = produced
+
+    # ------------------------------------------------------------- shared
+    def _link_expression_deps(
+        self,
+        tr: DataFlowTransformation,
+        inputs: list[str],
+        target: str,
+        referenced: tuple[str, ...],
+        relationship: RelationshipType,
+        expression: str | None,
+        confidence: str,
+    ) -> None:
+        if not referenced:
+            if confidence == "none":
+                self.warn(
+                    f"Data flow '{self.df.name}': could not determine the source columns "
+                    f"for '{tr.name}.{target}' (expression: {expression!r})."
+                )
+            return
+        for column in referenced:
+            located = self._locate(column, inputs)
+            if not located:
+                self.warn(
+                    f"Data flow '{self.df.name}': '{tr.name}.{target}' references column "
+                    f"'{column}' which is not in any input stream."
+                )
+                continue
+            for src in located:
+                self.graph.add_dependency(
+                    src,
+                    column,
+                    tr.name,
+                    target,
+                    relationship=relationship,
+                    transformation=tr.name,
+                    transformation_type=tr.kind,
+                    expression=expression,
+                )
+
+
+def _dedup(values: Iterable[str]) -> list[str]:
+    seen: dict[str, None] = {}
+    for value in values:
+        seen.setdefault(value, None)
+    return list(seen)
+
+
+def build_data_flow_lineage(data_flow: DataFlow) -> DataFlowLineage:
+    """Build a deterministic column-lineage graph for one Mapping Data Flow."""
+    return _Builder(data_flow).build()

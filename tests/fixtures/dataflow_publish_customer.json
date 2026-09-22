@@ -1,0 +1,33 @@
+{
+  "name": "PublishCustomerFlow",
+  "properties": {
+    "type": "MappingDataFlow",
+    "description": "Publish the conformed customer dimension to the reporting store.",
+    "typeProperties": {
+      "sources": [
+        { "name": "DimCustomerSource", "dataset": { "referenceName": "DimCustomer", "type": "DatasetReference" } }
+      ],
+      "sinks": [
+        { "name": "PublishSink", "dataset": { "referenceName": "PublishCustomer", "type": "DatasetReference" } }
+      ],
+      "transformations": [
+        { "name": "SelectPublishColumns" }
+      ],
+      "scriptLines": [
+        "source(output(",
+        "\t\tcust_key as string,",
+        "\t\tfull_name as string,",
+        "\t\tregion_code as string,",
+        "\t\tstatus as string",
+        "\t),",
+        "\tallowSchemaDrift: true,",
+        "\tvalidateSchema: false) ~> DimCustomerSource",
+        "DimCustomerSource select(mapColumn(",
+        "\t\tcust_key,",
+        "\t\tfull_name,",
+        "\t\tregion_code)) ~> SelectPublishColumns",
+        "SelectPublishColumns sink(allowSchemaDrift: true) ~> PublishSink"
+      ]
+    }
+  }
+}

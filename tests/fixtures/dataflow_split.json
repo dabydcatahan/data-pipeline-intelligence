@@ -1,0 +1,26 @@
+{
+  "name": "OrderRoutingFlow",
+  "properties": {
+    "type": "MappingDataFlow",
+    "description": "Route orders to high-value and standard sinks by amount.",
+    "typeProperties": {
+      "sources": [
+        { "name": "Orders", "dataset": { "referenceName": "OrdersDs", "type": "DatasetReference" } }
+      ],
+      "sinks": [
+        { "name": "HighValueSink", "dataset": { "referenceName": "HighOrdersDs", "type": "DatasetReference" } },
+        { "name": "StandardSink", "dataset": { "referenceName": "StandardOrdersDs", "type": "DatasetReference" } }
+      ],
+      "transformations": [
+        { "name": "RouteByValue" }
+      ],
+      "scriptLines": [
+        "source(output(order_id as string, amount as double, region as string)) ~> Orders",
+        "Orders split(amount > 1000,",
+        "\tdisjoint: false) ~> RouteByValue@(highValue, standard)",
+        "RouteByValue@highValue sink(allowSchemaDrift: true) ~> HighValueSink",
+        "RouteByValue@standard sink(allowSchemaDrift: true) ~> StandardSink"
+      ]
+    }
+  }
+}

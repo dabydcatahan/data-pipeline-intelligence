@@ -1,0 +1,28 @@
+{
+  "name": "SalesRollupFlow",
+  "properties": {
+    "type": "MappingDataFlow",
+    "typeProperties": {
+      "sources": [
+        { "name": "OnlineSales", "dataset": { "referenceName": "OnlineSalesDs", "type": "DatasetReference" } },
+        { "name": "StoreSales", "dataset": { "referenceName": "StoreSalesDs", "type": "DatasetReference" } }
+      ],
+      "sinks": [
+        { "name": "SalesSink", "dataset": { "referenceName": "FactSalesDaily", "type": "DatasetReference" } }
+      ],
+      "transformations": [
+        { "name": "UnionSales" },
+        { "name": "AggregateDaily" }
+      ],
+      "scriptLines": [
+        "source(output(sale_date as string, customer_id as string, amount as double)) ~> OnlineSales",
+        "source(output(sale_date as string, customer_id as string, amount as double)) ~> StoreSales",
+        "OnlineSales, StoreSales union() ~> UnionSales",
+        "UnionSales aggregate(groupBy(sale_date, customer_id),",
+        "\ttotal_amount = sum(amount),",
+        "\torder_count = count()) ~> AggregateDaily",
+        "AggregateDaily sink(allowSchemaDrift: true) ~> SalesSink"
+      ]
+    }
+  }
+}

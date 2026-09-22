@@ -1,0 +1,36 @@
+{
+  "name": "StageCustomerPipeline",
+  "properties": {
+    "description": "Land raw customer data into the staging dataset with an explicit column map.",
+    "activities": [
+      {
+        "name": "CopyRawToStage",
+        "type": "Copy",
+        "inputs": [{ "referenceName": "RawCustomer", "type": "DatasetReference" }],
+        "outputs": [{ "referenceName": "StageCustomer", "type": "DatasetReference" }],
+        "typeProperties": {
+          "source": { "type": "JsonSource" },
+          "sink": { "type": "ParquetSink" },
+          "translator": {
+            "type": "TabularTranslator",
+            "mappings": [
+              { "source": { "name": "CustomerId", "type": "String" }, "sink": { "name": "customer_id", "type": "String" } },
+              { "source": { "name": "FirstName", "type": "String" }, "sink": { "name": "first_name", "type": "String" } },
+              { "source": { "name": "LastName", "type": "String" }, "sink": { "name": "last_name", "type": "String" } },
+              { "source": { "name": "RegionCode", "type": "String" }, "sink": { "name": "region_code", "type": "String" } },
+              { "source": { "name": "Status", "type": "String" }, "sink": { "name": "status", "type": "String" } }
+            ]
+          }
+        }
+      },
+      {
+        "name": "RunCustomerFlow",
+        "type": "ExecuteDataFlow",
+        "dependsOn": [{ "activity": "CopyRawToStage", "dependencyConditions": ["Succeeded"] }],
+        "typeProperties": {
+          "dataflow": { "referenceName": "CustomerEnrichFlow", "type": "DataFlowReference" }
+        }
+      }
+    ]
+  }
+}

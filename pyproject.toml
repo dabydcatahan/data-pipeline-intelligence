@@ -1,0 +1,92 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "data-pipeline-intelligence"
+version = "0.1.0"
+description = "Automated Azure Data Factory column-level lineage, documentation & AI insights (offline, upload-driven)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [{ name = "Data Pipeline Intelligence Team" }]
+keywords = ["azure-data-factory", "adf", "data-lineage", "documentation", "column-lineage"]
+
+dependencies = [
+    "streamlit>=1.36",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "networkx>=3.3",
+    "gpt4all>=2.1.0",
+]
+
+[project.optional-dependencies]
+viz = [
+    "pyvis>=0.3.2",
+    "graphviz>=0.20",
+]
+llm = [
+    # Optional. Only imported by app/insights/llm.py when explicitly enabled.
+    "anthropic>=0.34",
+]
+dev = [
+    "pytest>=8.2",
+    "pytest-cov>=5.0",
+    "ruff>=0.5",
+    "mypy>=1.10",
+]
+
+[project.scripts]
+# Convenience entrypoint; the app is normally started with `streamlit run app/ui/app.py`.
+adf-intelligence = "app.ui.launch:main"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["app", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4", "SIM", "RUF"]
+ignore = ["B008"]  # Streamlit / FastAPI-style default-in-call patterns
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101"]
+# app.py runs a sys.path bootstrap before its imports (so `streamlit run` works
+# without an editable install).
+"app/ui/app.py" = ["E402"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.11"
+packages = ["app"]
+strict = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+disallow_untyped_decorators = false
+plugins = ["pydantic.mypy"]
+# The Streamlit UI layer (DEC-002) is deliberately thin and untyped: it only
+# wires widgets to already-typed services. Excluded from strict type checking.
+exclude = ["^app/ui/"]
+
+[[tool.mypy.overrides]]
+module = ["networkx.*", "pyvis.*", "graphviz.*", "streamlit.*", "anthropic.*", "gpt4all.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-ra -q"
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = [
+    "integration: end-to-end flows across multiple components",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["app"]
+omit = ["app/ui/*"]
