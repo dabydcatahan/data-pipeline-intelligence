@@ -181,3 +181,42 @@ def test_pivot_groupby_is_direct_and_values_approximated(lineage):
     # (the pivot key itself) is consumed, not carried through as its own output.
     produced = {g.node(n).column for n in g.node_ids() if n.startswith("PivotByQuarter::")}
     assert produced == {"customer_id", "amount_Q1", "amount_Q2", "amount_Q3", "amount_Q4"}
+
+
+def test_parse_introduces_one_derived_struct_column(lineage):
+    lin = lineage("dataflow_parse.json")
+    assert lin.warnings == ()
+    g = lin.graph
+
+    # parse() adds exactly one new struct column, derived from the source string.
+    assert _rel(g, "EventSource::jsonString", "ParseTradeJson::json") is (RelationshipType.DERIVED)
+    # Existing columns (including the original string column parse() read from)
+    # still pass through unchanged - parse() doesn't consume its source.
+    assert g.edge("EventSource::jsonString", "ParseTradeJson::jsonString").passthrough is True
+    assert g.edge("EventSource::event_id", "ParseTradeJson::event_id").passthrough is True
+
+    # A later select() unpacking a struct field (json.trade) correctly resolves
+    # the dependency back to the struct column parse() produced.
+    assert _rel(g, "ParseTradeJson::json", "SelectTradeFields::trade") is (RelationshipType.DERIVED)
+    assert "TradeSink::trade" in g.downstream("EventSource::jsonString")
+
+
+def test_surrogate_key_adds_a_column_with_no_upstream_origin(lineage):
+    lin = lineage("dataflow_surrogate_key.json")
+    assert lin.warnings == ()
+    g = lin.graph
+
+    # The generated key column must exist in the sink schema (previously,
+    # keyGenerate fell through to plain passthrough, which only carries EXISTING
+    # input columns - the surrogate key column was invisible in lineage entirely).
+    assert "DimCustomerSink::customer_key" in g.node_ids()
+    # It's a synthetic sequence: no upstream column dependency at all.
+    assert list(g.networkx.predecessors("SurrogateKey1::customer_key")) == []
+    # Every existing column still passes through unchanged alongside it.
+    assert g.edge("CustomerSource::customer_id", "SurrogateKey1::customer_id").passthrough is True
+
+    from app.lineage.traversal import explain
+
+    (node,) = g.find("DimCustomerSink.customer_key")
+    journey = explain(g, node)
+    assert journey.origins == ("SurrogateKey1::customer_key",)

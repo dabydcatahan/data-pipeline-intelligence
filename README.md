@@ -79,7 +79,9 @@ performance benchmark).
 | Data flow `join` / `lookup` / `filter` / `union` / `flatten` | Yes | Keys/predicates decomposed into JOIN_KEY / LOOKUP / FILTER / UNION edges from the parsed condition/argument expression |
 | Data flow `window` | Yes | `over()`/`asc()`/`desc()` partition+sort columns and `windowColumns()` expressions decomposed into WINDOW edges |
 | Data flow `pivot` | Partial | `groupBy()` columns decomposed (DIRECT); aggregate columns decomposed (AGGREGATE) with output names approximated from a literal `pivotBy()` value list — real column names are data-dependent |
-| Data flow `unpivot` / `parse` / `surrogateKey` / … | Partial | Recognized and kept; arguments not yet decomposed (passthrough approximation) |
+| Data flow `parse` | Yes | One new struct-typed column decomposed (DERIVED from its source); a later `select`/`derive` unpacking a field via dot notation (`json.field`) already resolves back to it |
+| Data flow `surrogateKey` / `keyGenerate` | Yes | New generated-sequence column decomposed with no upstream dependency (it's a row counter, correctly its own origin) - previously invisible in lineage entirely (fell through to plain passthrough, which only carries *existing* columns) |
+| Data flow `unpivot` / … | Partial | Recognized and kept; arguments not yet decomposed (passthrough approximation) - no documented Data Flow Script syntax found to decompose against safely |
 | Unknown data flow operators | Yes | Flagged as a warning, kept, never fatal |
 | Expressions — data-flow dialect | Yes | Referenced columns resolved (`concat`, `iif`, `isNull`, `toString`, `substring`, `sum`, `byName`, `stream@col`, `$param`); unsupported → "Unable to determine automatically" |
 | Expressions — pipeline dialect (`@concat`, `pipeline().parameters.x`) | Partial | Function names + parameter/variable references only |

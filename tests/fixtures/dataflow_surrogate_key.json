@@ -1,0 +1,23 @@
+{
+  "name": "CustomerDimFlow",
+  "properties": {
+    "type": "MappingDataFlow",
+    "typeProperties": {
+      "sources": [
+        { "name": "CustomerSource", "dataset": { "referenceName": "CustomerDs", "type": "DatasetReference" } }
+      ],
+      "sinks": [
+        { "name": "DimCustomerSink", "dataset": { "referenceName": "DimCustomerDs", "type": "DatasetReference" } }
+      ],
+      "transformations": [
+        { "name": "SurrogateKey1" }
+      ],
+      "scriptLines": [
+        "source(output(customer_id as string, first_name as string)) ~> CustomerSource",
+        "CustomerSource keyGenerate(output(customer_key as long),",
+        "\tstartAt: 1L) ~> SurrogateKey1",
+        "SurrogateKey1 sink(allowSchemaDrift: true) ~> DimCustomerSink"
+      ]
+    }
+  }
+}

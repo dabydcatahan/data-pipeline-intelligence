@@ -28,6 +28,14 @@ pivot                   output schema = groupBy keys (DIRECT) + approximated
                         ``<alias>_<value>`` targets when pivotBy() gives a literal value
                         list (AGGREGATE); non-key, non-aggregated columns are dropped -
                         output names are inherently data-dependent, so this is approximate
+parse                   keep every input column (PASSTHROUGH) + one new struct-typed
+                        target derived from its source column (DERIVED); the struct's
+                        inner fields aren't separate columns at this stage - a later
+                        select/derive unpacking them via dot notation (``json.field``)
+                        already resolves back to this column through the expression parser
+surrogateKey /          keep every input column (PASSTHROUGH) + one new generated-sequence
+keyGenerate             column with no upstream dependency (it's a row counter, not derived
+                        from anything - the column is its own origin)
 other / unknown         passthrough all input columns (approximate) + a warning
 sink                    output schema = feeding stream's schema; DIRECT edges
 ======================  ==================================================================
@@ -327,6 +335,9 @@ class _Builder:
             "split": self._op_split,
             "window": self._op_window,
             "pivot": self._op_pivot,
+            "parse": self._op_parse,
+            "surrogateKey": self._op_surrogate_key,
+            "keyGenerate": self._op_surrogate_key,
         }.get(op)
         if handler is not None:
             handler(tr, inputs)
@@ -739,6 +750,85 @@ class _Builder:
             operator="pivot",
             pivot_by=pivot_column or "",
             pivot_group_by=tuple(_dedup(group_cols)),
+        )
+        self.schema[tr.name] = _dedup(produced)
+
+    def _op_parse(self, tr: DataFlowTransformation, inputs: list[str]) -> None:
+        """`<target> = <source> ? (<field> as <type>, ...), format: '...', ...`.
+
+        At the DFS level, `parse` introduces exactly ONE new struct-typed column
+        (`target`), derived from `source`; the declared fields are that struct's
+        *inner* schema, not separate top-level columns (a later `select`/`derive`
+        unpacks them via dot notation, e.g. `trade = json.trade`, which the
+        existing `select`/`derive` handling already resolves via the expression
+        parser). Every other existing column passes through unchanged.
+        """
+        target: str | None = None
+        source_expr: str | None = None
+        for part in split_top_level(tr.raw_arguments):
+            if _OPTION_RE.match(part):
+                continue
+            assignment = _split_first_assignment(part)
+            if assignment:
+                target, rhs = assignment
+                source_expr = rhs.split("?", 1)[0].strip()
+                break
+
+        carried = self._passthrough(tr, inputs, skip={target} if target else set())
+        produced = list(carried)
+        if target:
+            produced.append(target)
+            self._add_output(tr.name, target)
+            analysis = analyze_expression(source_expr or "")
+            self._link_expression_deps(
+                tr,
+                inputs,
+                target,
+                analysis.referenced_columns,
+                RelationshipType.DERIVED,
+                source_expr,
+                analysis.confidence,
+            )
+        else:
+            self.warn(
+                f"Data flow '{self.df.name}': parse '{tr.name}' has no recognizable "
+                "'<target> = <source> ? (...)' assignment; treated as passthrough."
+            )
+        self.schema[tr.name] = _dedup(produced)
+
+    def _op_surrogate_key(self, tr: DataFlowTransformation, inputs: list[str]) -> None:
+        """`<stream> keyGenerate(output(<col> as long), startAt: 1L) ~> Name`.
+
+        Adds one synthetic, sequentially-generated column with no upstream
+        column dependency (there is nothing to derive it *from* - it's a row
+        counter) on top of every existing column passing through unchanged.
+        """
+        inside = None
+        for part in split_top_level(tr.raw_arguments):
+            candidate = _strip_call(part, "output")
+            if candidate is not None:
+                inside = candidate
+                break
+
+        key_column: str | None = None
+        if inside:
+            first = split_top_level(inside)[0] if split_top_level(inside) else ""
+            key_column = first.split(" as ", 1)[0].strip() or None
+
+        carried = self._passthrough(tr, inputs, skip={key_column} if key_column else set())
+        produced = list(carried)
+        if key_column:
+            produced.append(key_column)
+            self._add_output(tr.name, key_column)
+            # Deliberately no add_dependency(): a generated sequence has no
+            # source column, so this node is its own origin (no inbound edges).
+        else:
+            self.warn(
+                f"Data flow '{self.df.name}': surrogate key '{tr.name}' has no recognizable "
+                "output(<col> as ...) clause; treated as passthrough."
+            )
+        self.graph.register_stream(
+            tr.name, StreamKind.TRANSFORMATION.value, operator="surrogateKey"
         )
         self.schema[tr.name] = _dedup(produced)
 

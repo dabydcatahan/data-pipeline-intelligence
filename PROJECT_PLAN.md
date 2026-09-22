@@ -11,7 +11,7 @@ Insights (deterministic only; LLM support removed, see session 13). Remaining wo
 Release Checklist (coverage on core packages, Docker image build verification,
 security review of the upload path, 5 MiB performance check).
 
-**Last updated:** 2026-09-22 (session 18)
+**Last updated:** 2026-09-22 (session 19)
 
 **Verification (session 12):** `ruff check` clean · `ruff format --check` clean ·
 `mypy` clean (47 files) · `pytest` 175 passed (incl. 7 Streamlit `AppTest` smoke
@@ -1186,8 +1186,44 @@ documented guarantee against the actual code (not just the docs):
 
 Full suite green, `mypy app` / `ruff check` / `ruff format --check` all clean.
 
+### Session 19 (2026-09-22) — `parse` / `surrogateKey` lineage decomposition
+
+Closed two of the three lineage gaps flagged in session 14/16 (`unpivot` stays
+deliberately deferred - see below).
+
+- **`parse`** (verified DFS syntax against `data-flow-parse.md`:
+  `<target> = <source> ? (<field> as <type>, ...), format: '...', ...`):
+  decomposes to exactly one new DERIVED struct-typed column from its source,
+  alongside every existing column passing through unchanged (parse doesn't
+  consume its source string column). The struct's declared *inner* fields
+  aren't separate top-level columns at the DFS level - a later `select`/
+  `derive` unpacking one via dot notation (`trade = json.trade`) already
+  resolves correctly back to the parse-produced column through the existing
+  expression parser (confirmed: `analyze_expression("json.trade")` already
+  returns `referenced_columns=("json",)`), so no extra work was needed there.
+- **`surrogateKey`/`keyGenerate`** (verified syntax:
+  `<stream> keyGenerate(output(<col> as long), startAt: 1L) ~> Name`): adds
+  one new column with **no** upstream dependency - it's a generated sequence,
+  correctly its own lineage origin, not derived from any input. This fixes a
+  real, not just cosmetic, gap: previously `keyGenerate` fell through to
+  plain passthrough, which only carries columns that already exist in the
+  input schema - the surrogate key column was **invisible in the lineage
+  graph entirely**, not merely mis-attributed.
+- **`unpivot` deliberately NOT attempted**: fetched Microsoft's own
+  `data-flow-unpivot.md` directly and confirmed it contains no Data Flow
+  Script syntax example at all (UI-configuration screenshots only). Guessing
+  the script grammar risks being confidently wrong - worse than the existing,
+  correctly-labeled "Partial" passthrough approximation - so it stays as is.
+  Compatibility matrix row narrowed from `unpivot`/`parse`/`surrogateKey`/…
+  down to just `unpivot`/….
+- New fixtures `dataflow_parse.json`, `dataflow_surrogate_key.json`; 2 new
+  tests in `test_column_lineage.py`, including one asserting the surrogate key
+  column now actually appears in the sink schema (the "previously invisible"
+  regression). Full suite green (297 tests), `mypy app` / `ruff check` /
+  `ruff format --check` all clean.
+
 **Next recommended task:** the remaining release-checklist item - a ~5 MiB
 synthetic pipeline/data-flow performance benchmark (parse + lineage + combined
-graph, confirm the <2s/<200ms targets in §11) - plus the lower-priority lineage
-gaps noted in session 14/16 (`unpivot`/`parse`/`surrogateKey` argument
-decomposition, pipeline-dialect expression parser column notion).
+graph, confirm the <2s/<200ms targets in §11) - plus the pipeline-dialect
+expression parser's missing column notion (session 14/16), which is the one
+lineage gap left unaddressed across sessions 14/16/19.

@@ -1,0 +1,30 @@
+{
+  "name": "ParseTradeEventFlow",
+  "properties": {
+    "type": "MappingDataFlow",
+    "typeProperties": {
+      "sources": [
+        { "name": "EventSource", "dataset": { "referenceName": "EventDs", "type": "DatasetReference" } }
+      ],
+      "sinks": [
+        { "name": "TradeSink", "dataset": { "referenceName": "TradeDs", "type": "DatasetReference" } }
+      ],
+      "transformations": [
+        { "name": "ParseTradeJson" },
+        { "name": "SelectTradeFields" }
+      ],
+      "scriptLines": [
+        "source(output(event_id as string, jsonString as string)) ~> EventSource",
+        "EventSource parse(json = jsonString ? (trade as boolean,",
+        "\t\tcustomers as string[]),",
+        "\tformat: 'json',",
+        "\tdocumentForm: 'arrayOfDocuments') ~> ParseTradeJson",
+        "ParseTradeJson select(mapColumn(",
+        "\t\tevent_id,",
+        "\t\ttrade = json.trade",
+        "\t)) ~> SelectTradeFields",
+        "SelectTradeFields sink(allowSchemaDrift: true) ~> TradeSink"
+      ]
+    }
+  }
+}
