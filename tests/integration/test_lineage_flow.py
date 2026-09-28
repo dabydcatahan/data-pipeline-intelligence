@@ -54,8 +54,10 @@ def test_cross_artifact_stitched_lineage(read_fixture_bytes, settings):
 
     combined = service.combined_lineage(session)
     (raw,) = service.explain_column(combined, "RawCustomer.CustomerId")
-    # traced across the pipeline Copy, the dataset handoff, and the data flow
-    assert "CustomerSink::cust_key" in raw.downstream_columns
+    # traced across the pipeline Copy, the dataset handoff, and the data flow.
+    # The data flow's own streams are namespaced by its name (CustomerEnrichFlow)
+    # so they can never collide with another artifact's identically-named stream.
+    assert "CustomerEnrichFlow/CustomerSink::cust_key" in raw.downstream_columns
     assert {"CopyRawToStage", "StageCustomer", "DeriveCustomerKey", "RenameColumns"} <= set(
         raw.transformations
     )

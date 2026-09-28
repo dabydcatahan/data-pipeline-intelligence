@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 
 from app.lineage import build_combined_lineage, build_pipeline_lineage, explain
 from app.lineage.pipeline_lineage import build_data_flow_chain
@@ -43,19 +44,104 @@ def test_stitch_links_pipeline_to_data_flow_by_dataset(read_fixture_bytes):
     df, _ = DataFlowParser().parse(json.loads(read_fixture_bytes("dataflow_customer_full.json")))
     from app.lineage import build_data_flow_lineage
 
-    dl = build_data_flow_lineage(df)
-    combined = build_combined_lineage([pl, dl], list(data_flow_bindings(df)))
+    dl = replace(build_data_flow_lineage(df), bindings=data_flow_bindings(df))
+    combined = build_combined_lineage([pl, dl])
 
     assert combined.kind == "combined"
     assert any("cross-artifact column link" in w for w in combined.warnings)
-    # the dataset handoff edge exists
-    handoff = combined.graph.edge("StageCustomer::customer_id", "CustomerSource::customer_id")
+    # the dataset handoff edge exists - the data flow's own streams are namespaced
+    # by its name (CustomerEnrichFlow) so they can never collide with another
+    # artifact's identically-named stream; the pipeline side is left as the
+    # dataset name it already is (stitching keys off shared dataset identity).
+    handoff = combined.graph.edge(
+        "StageCustomer::customer_id", "CustomerEnrichFlow/CustomerSource::customer_id"
+    )
     assert handoff.transformation_type == "dataset"
 
     # end-to-end: a raw source column reaches the final data-flow sink column
     (node_id,) = combined.graph.find("RawCustomer.CustomerId")
     journey = explain(combined.graph, node_id)
-    assert "CustomerSink::cust_key" in journey.downstream_columns
+    assert "CustomerEnrichFlow/CustomerSink::cust_key" in journey.downstream_columns
+
+
+def test_combined_lineage_does_not_merge_unrelated_data_flows_with_the_same_stream_names():
+    """Two unrelated data flows reusing ADF's own default stream names.
+
+    ADF Studio assigns generic defaults (``source1``, ``sink1``, ``Derive1``,
+    ...) whenever a user doesn't rename a transformation, so two completely
+    unrelated data flows sharing those names is common, not a contrived edge
+    case. Before namespacing streams by their owning data flow, stitching two
+    such flows together silently merged their columns into one node - a
+    customer id and an unrelated order id would both land on a transformation
+    literally named ``sink1`` and look like the same column.
+    """
+    flow_a = {
+        "name": "CustomerFlow",
+        "properties": {
+            "type": "MappingDataFlow",
+            "typeProperties": {
+                "sources": [
+                    {
+                        "name": "source1",
+                        "dataset": {"referenceName": "DsA", "type": "DatasetReference"},
+                    }
+                ],
+                "sinks": [
+                    {
+                        "name": "sink1",
+                        "dataset": {"referenceName": "OutA", "type": "DatasetReference"},
+                    }
+                ],
+                "transformations": [],
+                "scriptLines": [
+                    "source(output(id as string)) ~> source1",
+                    "source1 sink(allowSchemaDrift: true) ~> sink1",
+                ],
+            },
+        },
+    }
+    flow_b = {
+        "name": "OrderFlow",
+        "properties": {
+            "type": "MappingDataFlow",
+            "typeProperties": {
+                "sources": [
+                    {
+                        "name": "source1",
+                        "dataset": {"referenceName": "DsB", "type": "DatasetReference"},
+                    }
+                ],
+                "sinks": [
+                    {
+                        "name": "sink1",
+                        "dataset": {"referenceName": "OutB", "type": "DatasetReference"},
+                    }
+                ],
+                "transformations": [{"name": "Derive1"}],
+                "scriptLines": [
+                    "source(output(order_num as string)) ~> source1",
+                    "source1 derive(id = toString(order_num)) ~> Derive1",
+                    "Derive1 sink(allowSchemaDrift: true) ~> sink1",
+                ],
+            },
+        },
+    }
+    from app.lineage import build_data_flow_lineage
+
+    df_a, _ = DataFlowParser().parse(flow_a)
+    df_b, _ = DataFlowParser().parse(flow_b)
+    lin_a = replace(build_data_flow_lineage(df_a), bindings=data_flow_bindings(df_a))
+    lin_b = replace(build_data_flow_lineage(df_b), bindings=data_flow_bindings(df_b))
+
+    combined = build_combined_lineage([lin_a, lin_b])
+    g = combined.graph
+
+    # Each flow's "sink1::id" is kept distinct, namespaced by its own data flow.
+    assert list(g.networkx.predecessors("CustomerFlow/sink1::id")) == ["CustomerFlow/source1::id"]
+    assert list(g.networkx.predecessors("OrderFlow/sink1::id")) == ["OrderFlow/Derive1::id"]
+    # The unqualified names from before the fix must not appear at all.
+    assert "sink1::id" not in g.node_ids()
+    assert "source1::id" not in g.node_ids()
 
 
 def test_data_flow_chain_orders_and_links_activities_through_a_gap(read_fixture_bytes):

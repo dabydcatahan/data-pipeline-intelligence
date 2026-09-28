@@ -44,18 +44,35 @@ def shared_datasets(upstream: DataFlow, downstream: DataFlow) -> tuple[str, ...]
     return tuple(sorted(upstream_sinks & downstream_sources))
 
 
-def _copy_into(target: ColumnLineageGraph, source: ColumnLineageGraph) -> None:
+def _qualify(prefix: str | None, stream: str) -> str:
+    """Namespace a data flow's own stream name by its owning artifact.
+
+    Mapping Data Flow transformation names (``source1``, ``sink1``, ``Derive1``,
+    ...) are only unique *within* one data flow - ADF Studio assigns exactly
+    these defaults whenever a user doesn't rename a transformation, so two
+    unrelated data flows commonly share them. Without this, copying both into
+    one combined graph would silently collapse two unrelated columns into a
+    single node (e.g. a customer id and an unrelated order id both landing on
+    a transformation named ``sink1``). Pipeline lineage streams are already
+    globally-scoped dataset names (``build_pipeline_lineage`` keys them by
+    dataset, not by activity), so ``prefix=None`` leaves those untouched -
+    that's the identity the dataset-based stitching below relies on.
+    """
+    return stream if prefix is None else f"{prefix}/{stream}"
+
+
+def _copy_into(target: ColumnLineageGraph, source: ColumnLineageGraph, prefix: str | None) -> None:
     for stream, kind in source.streams.items():
-        target.register_stream(stream, kind, **source.stream_meta.get(stream, {}))
+        target.register_stream(_qualify(prefix, stream), kind, **source.stream_meta.get(stream, {}))
     for node in source.iter_nodes():
-        target.add_column(node.stream, node.column, node.kind)
+        target.add_column(_qualify(prefix, node.stream), node.column, node.kind)
     for edge in source.edges():
         s_stream, s_col = _split(edge.source)
         t_stream, t_col = _split(edge.target)
         target.add_dependency(
-            s_stream,
+            _qualify(prefix, s_stream),
             s_col,
-            t_stream,
+            _qualify(prefix, t_stream),
             t_col,
             relationship=edge.relationship,
             transformation=edge.transformation,
@@ -70,17 +87,26 @@ def _split(node_id: str) -> tuple[str, str]:
     return stream, column
 
 
-def build_combined_lineage(
-    lineages: list[DataFlowLineage],
-    extra_bindings: list[tuple[str, str, str]] | None = None,
-) -> DataFlowLineage:
-    combined = ColumnLineageGraph("(combined)")
-    for lineage in lineages:
-        _copy_into(combined, lineage.graph)
+def build_combined_lineage(lineages: list[DataFlowLineage]) -> DataFlowLineage:
+    """Merge every lineage's graph and link them by shared dataset identity.
 
-    bindings: list[tuple[str, str, str]] = list(extra_bindings or [])
+    Each data flow's bindings are namespaced by that data flow's own name (see
+    :func:`_qualify`) so a binding can only ever match streams from the SAME
+    data flow it came from - passing bindings for one artifact separately from
+    its lineage (e.g. a flat list spanning several data flows) would reopen
+    the exact stream-name collision this namespacing prevents, since there
+    would be no way to tell which artifact a bare stream name belongs to.
+    Attach bindings to a lineage via ``dataclasses.replace(lineage, bindings=...)``
+    before passing it in here.
+    """
+    combined = ColumnLineageGraph("(combined)")
+    bindings: list[tuple[str, str, str]] = []
     for lineage in lineages:
-        bindings.extend(lineage.bindings)
+        prefix = lineage.data_flow if lineage.kind == "data_flow" else None
+        _copy_into(combined, lineage.graph, prefix)
+        bindings.extend(
+            (_qualify(prefix, stream), dataset, role) for stream, dataset, role in lineage.bindings
+        )
 
     by_dataset: dict[str, dict[str, set[str]]] = defaultdict(
         lambda: {"reader": set(), "writer": set()}
@@ -89,6 +115,10 @@ def build_combined_lineage(
         if role in ("reader", "writer"):
             by_dataset[dataset][role].add(stream)
 
+    columns_by_stream: dict[str, set[str]] = defaultdict(set)
+    for node in combined.iter_nodes():
+        columns_by_stream[node.stream].add(node.column)
+
     links = 0
     warnings: list[str] = []
     for dataset, roles in sorted(by_dataset.items()):
@@ -96,11 +126,11 @@ def build_combined_lineage(
         if not writers or not readers:
             continue
         for writer in writers:
-            writer_cols = {n.column for n in combined.iter_nodes() if n.stream == writer}
+            writer_cols = columns_by_stream.get(writer, set())
             for reader in readers:
                 if reader == writer:
                     continue
-                reader_cols = {n.column for n in combined.iter_nodes() if n.stream == reader}
+                reader_cols = columns_by_stream.get(reader, set())
                 for column in sorted(writer_cols & reader_cols):
                     combined.add_column(writer, column, NodeKind.SINK_COLUMN)
                     combined.add_column(reader, column, NodeKind.SOURCE_COLUMN)

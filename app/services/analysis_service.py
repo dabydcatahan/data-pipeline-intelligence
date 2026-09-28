@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from app.core.config import AppSettings, get_settings
@@ -391,12 +391,12 @@ class AnalysisService:
     def combined_lineage(self, session: AnalysisSession) -> DataFlowLineage:
         """Merge every pipeline + data-flow graph and stitch by dataset identity (F008)."""
         lineages: list[DataFlowLineage] = [self.pipeline_lineage(p) for p in session.pipelines]
-        extra: list[tuple[str, str, str]] = []
         for artifact in session.data_flow_artifacts():
-            lineages.append(self.data_flow_lineage(artifact, session=session))
+            lineage = self.data_flow_lineage(artifact, session=session)
             if artifact.data_flow is not None:
-                extra.extend(data_flow_bindings(artifact.data_flow))
-        return build_combined_lineage(lineages, extra)
+                lineage = replace(lineage, bindings=data_flow_bindings(artifact.data_flow))
+            lineages.append(lineage)
+        return build_combined_lineage(lineages)
 
     @staticmethod
     def explain_column(lineage: DataFlowLineage, query: str) -> list[ColumnJourney]:
