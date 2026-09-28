@@ -387,7 +387,6 @@ class _Builder:
         produced: list[str] = []
         consumed: set[str] = set()
         for col in tr.columns:
-            produced.append(col.target)
             consumed.add(col.target)
             consumed.update(col.referenced_columns)
             self._add_output(tr.name, col.target)
@@ -404,7 +403,9 @@ class _Builder:
                 relationship,
                 col.expression,
                 col.analysis_confidence,
+                local=produced,
             )
+            produced.append(col.target)
 
         produced.extend(self._apply_select_rules(tr, inputs, consumed))
 
@@ -466,6 +467,7 @@ class _Builder:
     def _op_derive(self, tr: DataFlowTransformation, inputs: list[str]) -> None:
         targets = {c.target for c in tr.columns}
         carried = self._passthrough(tr, inputs, skip=targets)
+        produced: list[str] = []
         for col in tr.columns:
             self._add_output(tr.name, col.target)
             self._link_expression_deps(
@@ -476,8 +478,10 @@ class _Builder:
                 RelationshipType.DERIVED,
                 col.expression,
                 col.analysis_confidence,
+                local=produced,
             )
-        self.schema[tr.name] = _dedup([*carried, *(c.target for c in tr.columns)])
+            produced.append(col.target)
+        self.schema[tr.name] = _dedup([*carried, *produced])
 
     def _op_filter(self, tr: DataFlowTransformation, inputs: list[str]) -> None:
         produced = self._passthrough(tr, inputs)
@@ -524,7 +528,6 @@ class _Builder:
                     f"column '{key}'."
                 )
         for col in tr.columns:
-            produced.append(col.target)
             self._add_output(tr.name, col.target)
             self._link_expression_deps(
                 tr,
@@ -534,7 +537,9 @@ class _Builder:
                 RelationshipType.AGGREGATE,
                 col.expression,
                 col.analysis_confidence,
+                local=produced,
             )
+            produced.append(col.target)
         self.schema[tr.name] = _dedup(produced)
 
     def _op_union(self, tr: DataFlowTransformation, inputs: list[str]) -> None:
@@ -629,8 +634,8 @@ class _Builder:
         )
 
         produced = list(carried)
+        produced_targets: list[str] = []
         for target, expr in window_columns:
-            produced.append(target)
             self._add_output(tr.name, target)
             analysis = analyze_expression(expr)
             referenced = _dedup([*analysis.referenced_columns, *context_columns])
@@ -639,8 +644,22 @@ class _Builder:
                     f"Data flow '{self.df.name}': could not determine the source columns "
                     f"for '{tr.name}.{target}' (window expression: {expr!r})."
                 )
+            local_set = set(produced_targets)
             for column in referenced:
-                for src in self._locate(column, inputs):
+                located = self._locate(column, inputs)
+                if not located and column in local_set:
+                    self.graph.add_dependency(
+                        tr.name,
+                        column,
+                        tr.name,
+                        target,
+                        relationship=RelationshipType.WINDOW,
+                        transformation=tr.name,
+                        transformation_type="window",
+                        expression=expr,
+                    )
+                    continue
+                for src in located:
                     self.graph.add_dependency(
                         src,
                         column,
@@ -651,6 +670,8 @@ class _Builder:
                         transformation_type="window",
                         expression=expr,
                     )
+            produced.append(target)
+            produced_targets.append(target)
         self.schema[tr.name] = _dedup(produced)
 
     def _op_pivot(self, tr: DataFlowTransformation, inputs: list[str]) -> None:
@@ -883,7 +904,18 @@ class _Builder:
         relationship: RelationshipType,
         expression: str | None,
         confidence: str,
+        *,
+        local: Iterable[str] = (),
     ) -> None:
+        """Link ``target``'s referenced columns back to their source(s).
+
+        ``local`` lists columns this same transformation has already produced
+        earlier in its own block (e.g. an earlier ``derive``/``select`` entry).
+        A reference to one of those chains through it (an edge from the
+        earlier same-stream column) instead of being reported as unresolved -
+        DFS blocks are evaluated top-to-bottom and commonly build one column
+        from another (``fullNameUpper = upper(fullName)``).
+        """
         if not referenced:
             if confidence == "none":
                 self.warn(
@@ -891,8 +923,21 @@ class _Builder:
                     f"for '{tr.name}.{target}' (expression: {expression!r})."
                 )
             return
+        local_set = {c for c in local if c != target}
         for column in referenced:
             located = self._locate(column, inputs)
+            if not located and column in local_set:
+                self.graph.add_dependency(
+                    tr.name,
+                    column,
+                    tr.name,
+                    target,
+                    relationship=relationship,
+                    transformation=tr.name,
+                    transformation_type=tr.kind,
+                    expression=expression,
+                )
+                continue
             if not located:
                 self.warn(
                     f"Data flow '{self.df.name}': '{tr.name}.{target}' references column "

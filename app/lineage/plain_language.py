@@ -52,7 +52,7 @@ OPERATOR_PLAIN: dict[str, str] = {
     "split": "routes rows down different paths based on a condition",
     "conditionalsplit": "routes rows down different paths based on a condition",
     "parse": "reads structured text (e.g. JSON) out of a column",
-    "foldDown": "expands array/object data into separate rows",
+    "folddown": "expands array/object data into separate rows",
     "wrangling": "applies spreadsheet-style data prep steps",
 }
 

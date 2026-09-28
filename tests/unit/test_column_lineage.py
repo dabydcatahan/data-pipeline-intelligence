@@ -2,6 +2,8 @@ import json
 
 import pytest
 from app.lineage import build_data_flow_lineage
+from app.lineage.column_lineage import DataFlowLineage
+from app.lineage.traversal import explain
 from app.models.lineage import NodeKind, RelationshipType
 from app.parsers.dataflow_parser import DataFlowParser
 
@@ -13,6 +15,33 @@ def lineage(read_fixture_bytes):
         return build_data_flow_lineage(df)
 
     return _build
+
+
+def _build_from_script(*script_lines: str) -> DataFlowLineage:
+    flow = {
+        "name": "InlineFlow",
+        "properties": {
+            "type": "MappingDataFlow",
+            "typeProperties": {
+                "sources": [
+                    {
+                        "name": "Src",
+                        "dataset": {"referenceName": "SrcDs", "type": "DatasetReference"},
+                    }
+                ],
+                "sinks": [
+                    {
+                        "name": "Snk",
+                        "dataset": {"referenceName": "SnkDs", "type": "DatasetReference"},
+                    }
+                ],
+                "transformations": [{"name": "Step1"}],
+                "scriptLines": list(script_lines),
+            },
+        },
+    }
+    df, _ = DataFlowParser().parse(flow)
+    return build_data_flow_lineage(df)
 
 
 def _rel(graph, src, dst):
@@ -220,3 +249,63 @@ def test_surrogate_key_adds_a_column_with_no_upstream_origin(lineage):
     (node,) = g.find("DimCustomerSink.customer_key")
     journey = explain(g, node)
     assert journey.origins == ("SurrogateKey1::customer_key",)
+
+
+def test_derive_chained_reference_to_an_earlier_derived_column_is_resolved():
+    """`fullNameUpper = upper(fullName)` where `fullName` is derived one line above.
+
+    Previously, a reference to a column produced earlier in the SAME derive
+    block was reported as "not in any input stream" and the edge was dropped
+    entirely, even though the referenced column plainly exists in the graph.
+    """
+    lin = _build_from_script(
+        "source(output(first as string, last as string)) ~> Src",
+        "Src derive(fullName = concat(first, last), fullNameUpper = upper(fullName)) ~> Step1",
+        "Step1 sink(allowSchemaDrift: true) ~> Snk",
+    )
+    assert lin.warnings == ()
+    g = lin.graph
+    assert _rel(g, "Step1::fullName", "Step1::fullNameUpper") is RelationshipType.DERIVED
+    (node,) = g.find("Snk.fullNameUpper")
+    assert explain(g, node).origins == ("Src::first", "Src::last")
+
+
+def test_select_chained_reference_to_an_earlier_mapped_column_is_resolved():
+    lin = _build_from_script(
+        "source(output(first as string, last as string)) ~> Src",
+        "Src select(mapColumn(fullName = concat(first, last), "
+        "initial = left(fullName, 1))) ~> Step1",
+        "Step1 sink(allowSchemaDrift: true) ~> Snk",
+    )
+    assert lin.warnings == ()
+    g = lin.graph
+    assert _rel(g, "Step1::fullName", "Step1::initial") is RelationshipType.DERIVED
+    (node,) = g.find("Snk.initial")
+    assert explain(g, node).origins == ("Src::first", "Src::last")
+
+
+def test_aggregate_chained_reference_to_an_earlier_aggregate_column_is_resolved():
+    lin = _build_from_script(
+        "source(output(customer_id as string, amount as double)) ~> Src",
+        "Src aggregate(groupBy(customer_id), total = sum(amount), doubled = total * 2) ~> Step1",
+        "Step1 sink(allowSchemaDrift: true) ~> Snk",
+    )
+    assert lin.warnings == ()
+    g = lin.graph
+    assert _rel(g, "Step1::total", "Step1::doubled") is RelationshipType.AGGREGATE
+    (node,) = g.find("Snk.doubled")
+    assert "Src::amount" in explain(g, node).origins
+
+
+def test_window_chained_reference_to_an_earlier_window_column_is_resolved():
+    lin = _build_from_script(
+        "source(output(customer_id as string, amount as double)) ~> Src",
+        "Src window(over(customer_id), "
+        "windowColumns(running_total = sum(amount), pct = running_total / 100)) ~> Step1",
+        "Step1 sink(allowSchemaDrift: true) ~> Snk",
+    )
+    assert lin.warnings == ()
+    g = lin.graph
+    assert _rel(g, "Step1::running_total", "Step1::pct") is RelationshipType.WINDOW
+    (node,) = g.find("Snk.pct")
+    assert "Src::amount" in explain(g, node).origins
